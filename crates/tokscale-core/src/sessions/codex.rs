@@ -12,7 +12,7 @@
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, is_zst_path, parse_timestamp_value,
-    session_id_from_path, MAX_ARCHIVE_BYTES,
+    session_id_from_path,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
@@ -21,6 +21,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+
+// Codex rollouts embed tool outputs and images; real archives exceed 256 MiB.
+// Keep decoded input bounded while accepting large historical sessions.
+const MAX_CODEX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Agents-tab bucket for a regular interactive Codex thread. Codex stamps each
 /// spawned thread with a random `agent_nickname` (a scientist/philosopher
@@ -1512,9 +1516,10 @@ pub(crate) fn parse_codex_file_incremental(
             };
         }
 
-        let reader = BufReader::new(decoder.take(MAX_ARCHIVE_BYTES + 1));
+        let reader = BufReader::new(decoder.take(MAX_CODEX_ARCHIVE_BYTES + 1));
         let mut parsed = parse_codex_reader(reader, &session_id, fallback_timestamp, 0, state);
-        if parsed.consumed_offset > MAX_ARCHIVE_BYTES || !parsed.parse_succeeded {
+        if parsed.consumed_offset > MAX_CODEX_ARCHIVE_BYTES || !parsed.parse_succeeded {
+            tracing::warn!(path = %path.display(), max_bytes = MAX_CODEX_ARCHIVE_BYTES, "Skipping incomplete or oversized Codex archive");
             parsed.messages.clear();
             parsed.fallback_timestamp_indices.clear();
             parsed.parse_succeeded = false;
@@ -4268,5 +4273,29 @@ mod tests {
 
         std::fs::write(&path, b"not a zstd stream").unwrap();
         assert!(parse_codex_file(&path).is_empty());
+    }
+    #[test]
+    fn compressed_rollouts_above_legacy_archive_limit_preserve_usage() {
+        use std::io::Write as _;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("large.jsonl.zst");
+        let mut encoder =
+            zstd::stream::write::Encoder::new(std::fs::File::create(&path).unwrap(), 0).unwrap();
+        writeln!(encoder, r#"{{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{{"model":"gpt-5"}}}}"#).unwrap();
+        let mut padding = vec![b' '; 1024 * 1024];
+        padding.push(b'\n');
+        for _ in 0..257 {
+            encoder.write_all(&padding).unwrap();
+        }
+        encoder.write_all(br#"{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}
+"#).unwrap();
+        encoder.finish().unwrap();
+
+        let messages = parse_codex_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5");
+        assert_eq!(messages[0].session_id, "large");
+        assert_eq!(messages[0].tokens.total(), 160);
     }
 }
