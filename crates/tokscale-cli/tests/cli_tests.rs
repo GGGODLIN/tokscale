@@ -7229,20 +7229,27 @@ fn test_codex_compressed_session_reports_usage() {
     )
     .unwrap();
 
-    let output = cmd_with_home(tmp.path())
-        .args(["--client", "codex", "--json", "--no-spinner"])
-        .output()
-        .unwrap();
+    // Check a cold archive scan, an uncompressed duplicate, and the warm cache.
+    for scan in 0..3 {
+        if scan == 1 {
+            fs::write(sessions.join("fixture.jsonl"), content).unwrap();
+        }
+        let output = cmd_with_home(tmp.path())
+            .args(["--client", "codex", "--json", "--no-spinner"])
+            .output()
+            .unwrap();
 
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(json["totalInput"].as_i64().unwrap(), 110);
-    assert_eq!(json["totalCacheRead"].as_i64().unwrap(), 30);
-    assert_eq!(json["totalOutput"].as_i64().unwrap(), 10);
-    assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["totalInput"].as_i64().unwrap(), 110);
+        assert_eq!(json["totalCacheRead"].as_i64().unwrap(), 30);
+        assert_eq!(json["totalOutput"].as_i64().unwrap(), 10);
+        assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
+        assert_eq!(json["entries"][0]["reasoning"].as_i64().unwrap(), 10);
+    }
 }
