@@ -554,21 +554,25 @@ fn allocate_row_by_days(
     )
 }
 
-/// Whether this message's row was split across days from log evidence rather
-/// than kept whole on the session's start day.
+/// Return the calendar day suffix when this message's row was split from log
+/// evidence rather than kept whole on the session's start day.
 ///
 /// The caller uses it to pick the best-covered copy of a session that appears
 /// in two databases: a split copy beats a no-logs fallback that would keep the
 /// whole lifetime row on the start day, whatever the database order. The day
 /// suffix is the signal — the fallback path's bare key never carries one.
-pub fn message_is_day_split(message: &UnifiedMessage) -> bool {
+pub fn message_day_split_day(message: &UnifiedMessage) -> Option<&str> {
     message
         .dedup_key
         .as_deref()
         .and_then(|key| key.rsplit_once(':'))
-        .is_some_and(|(_, day)| {
-            day.len() == 10 && chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok()
-        })
+        .map(|(_, day)| day)
+        .filter(|day| day.len() == 10 && chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok())
+}
+
+/// Whether this message carries a parser-owned logged-day suffix.
+pub fn message_is_day_split(message: &UnifiedMessage) -> bool {
+    message_day_split_day(message).is_some()
 }
 
 fn build_message(row: &HermesUsageRow, dedup_key: String) -> UnifiedMessage {
