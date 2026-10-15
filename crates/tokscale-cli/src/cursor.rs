@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -886,12 +886,14 @@ fn cursor_account_cache_stem(account_id: &str) -> String {
     format!("account-{:x}", Sha256::digest(account_id.as_bytes()))
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 struct CursorCacheOwnership {
     #[serde(rename = "_tokscale")]
     metadata: Option<CursorCacheOwner>,
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 struct CursorCacheOwner {
     version: u32,
@@ -899,9 +901,8 @@ struct CursorCacheOwner {
     account_id: String,
 }
 
+#[cfg(test)]
 fn cursor_cache_owner(contents: &str) -> Option<String> {
-    // Deserialize only metadata; do not allocate every usage event just to
-    // check ownership of a potentially large history.
     let value: CursorCacheOwnership = serde_json::from_str(contents).ok()?;
     let metadata = value.metadata?;
     if metadata.version != 1 {
@@ -910,14 +911,117 @@ fn cursor_cache_owner(contents: &str) -> Option<String> {
     Some(metadata.account_id)
 }
 
+fn legacy_cursor_cache_owner(contents: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(contents).ok()?;
+    let object = value.as_object()?;
+    if object.contains_key("_owner") || object.contains_key("zzTokscaleOwner") {
+        return None;
+    }
+    let metadata = object.get("_tokscale")?.as_object()?;
+    if metadata.get("version")?.as_u64()? != 1 {
+        return None;
+    }
+    metadata.get("accountId")?.as_str().map(str::to_string)
+}
+
+/// New caches carry a fixed-size owner hash and random generation at the start,
+/// plus the same generation at the end. Reading both bounded regions verifies
+/// ownership and catches truncated or mismatched cache moves without traversing
+/// a potentially 64 MiB usage array. Older caches fall back to one full parse
+/// until the next successful sync writes the envelope.
+#[derive(Deserialize)]
+struct CursorCacheOwnerHeader {
+    version: u32,
+    #[serde(rename = "ownerHash")]
+    owner_hash: String,
+    generation: String,
+}
+
+#[derive(Deserialize)]
+struct CursorCacheOwnerFooter {
+    version: u32,
+    generation: String,
+}
+
+const CURSOR_CACHE_OWNER_ENVELOPE_BYTES: usize = 1024;
+const CURSOR_CACHE_OWNER_HEADER_PREFIX: &[u8] = br#"{"_owner":"#;
+const CURSOR_CACHE_OWNER_FOOTER_PREFIX: &[u8] = br#","zzTokscaleOwner":"#;
+
+fn cursor_cache_owner_hash(account_id: &str) -> String {
+    format!("{:x}", Sha256::digest(account_id.as_bytes()))
+}
+
+fn cursor_cache_owner_hash_from_envelope(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+    let mut prefix = Vec::with_capacity(CURSOR_CACHE_OWNER_ENVELOPE_BYTES);
+    (&mut file)
+        .take(CURSOR_CACHE_OWNER_ENVELOPE_BYTES as u64)
+        .read_to_end(&mut prefix)
+        .ok()?;
+    let header_json = prefix.strip_prefix(CURSOR_CACHE_OWNER_HEADER_PREFIX)?;
+    let mut header_stream =
+        serde_json::Deserializer::from_slice(header_json).into_iter::<CursorCacheOwnerHeader>();
+    let header = header_stream.next()?.ok()?;
+    if header_json.get(header_stream.byte_offset()) != Some(&b',') {
+        return None;
+    }
+
+    let suffix_len = file_len.min(CURSOR_CACHE_OWNER_ENVELOPE_BYTES as u64) as usize;
+    file.seek(SeekFrom::End(-(suffix_len as i64))).ok()?;
+    let mut suffix = vec![0; suffix_len];
+    file.read_exact(&mut suffix).ok()?;
+    let footer_start = suffix
+        .windows(CURSOR_CACHE_OWNER_FOOTER_PREFIX.len())
+        .rposition(|window| window == CURSOR_CACHE_OWNER_FOOTER_PREFIX)?;
+    let footer_json = &suffix[footer_start + CURSOR_CACHE_OWNER_FOOTER_PREFIX.len()..];
+    let mut footer_stream =
+        serde_json::Deserializer::from_slice(footer_json).into_iter::<CursorCacheOwnerFooter>();
+    let footer = footer_stream.next()?.ok()?;
+    if footer_json.get(footer_stream.byte_offset()..) != Some(b"}".as_slice()) {
+        return None;
+    }
+
+    (header.version == 1
+        && footer.version == 1
+        && header.generation == footer.generation
+        && header.owner_hash.len() == 64
+        && header
+            .owner_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()))
+    .then_some(header.owner_hash)
+}
+
+fn cursor_cache_owner_hash_from_file(path: &Path) -> Option<String> {
+    if let Some(owner_hash) = cursor_cache_owner_hash_from_envelope(path) {
+        return Some(owner_hash);
+    }
+    let contents = fs::read_to_string(path).ok()?;
+    legacy_cursor_cache_owner(&contents).map(|account_id| cursor_cache_owner_hash(&account_id))
+}
+
 fn owned_cursor_cache(contents: &str, account_id: &str) -> Result<String> {
     let mut value: serde_json::Value = serde_json::from_str(contents)?;
     let object = value
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("Cursor usage cache must be a JSON object"))?;
+    let generation = uuid::Uuid::new_v4().to_string();
+    object.insert(
+        "_owner".to_string(),
+        serde_json::json!({
+            "version": 1,
+            "ownerHash": cursor_cache_owner_hash(account_id),
+            "generation": generation.clone(),
+        }),
+    );
     object.insert(
         "_tokscale".to_string(),
         serde_json::json!({"version": 1, "accountId": account_id}),
+    );
+    object.insert(
+        "zzTokscaleOwner".to_string(),
+        serde_json::json!({"version": 1, "generation": generation}),
     );
     Ok(serde_json::to_string(&value)?)
 }
@@ -941,13 +1045,16 @@ fn prepare_cursor_cache_layout(cache_dir: &Path, store: &CursorCredentialsStore)
         if !entry.file_type()?.is_file() {
             anyhow::bail!("Cursor cache is not a regular file: {}", path.display());
         }
-        let owner = fs::read_to_string(&path)
-            .ok()
-            .and_then(|contents| cursor_cache_owner(&contents));
-        let verified = owner.as_deref().is_some_and(|id| {
-            store.accounts.contains_key(id)
-                && ((name == "usage.json" && id == store.active_account_id)
-                    || name == format!("usage.{}.json", cursor_account_cache_stem(id)))
+        let owner_hash = cursor_cache_owner_hash_from_file(&path);
+        let owner_id = owner_hash.as_deref().and_then(|hash| {
+            store
+                .accounts
+                .keys()
+                .find(|id| cursor_cache_owner_hash(id) == hash)
+        });
+        let verified = owner_id.is_some_and(|id| {
+            (name == "usage.json" && id == &store.active_account_id)
+                || name == format!("usage.{}.json", cursor_account_cache_stem(id))
         });
         if !verified {
             archive_cache_file_in_dir(cache_dir, &path, "unverified").with_context(|| {
@@ -1507,10 +1614,9 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
                 return false;
             }
         }
-        let owner = fs::read_to_string(&active_path)
-            .ok()
-            .and_then(|contents| cursor_cache_owner(&contents));
-        if owner.as_deref() != Some(&store.active_account_id) {
+        let owner_hash = cursor_cache_owner_hash_from_file(&active_path);
+        let expected_hash = cursor_cache_owner_hash(&store.active_account_id);
+        if owner_hash.as_deref() != Some(expected_hash.as_str()) {
             return false;
         }
     }
@@ -1529,16 +1635,18 @@ fn cursor_usage_cache_is_fresh_in(home_dir: &Path, max_age: Duration) -> bool {
             // A recent attempt may excuse a missing or stale secondary, but
             // never a live file whose ownership is unknown or disagrees.
             if path.exists() {
-                let owner = fs::read_to_string(path)
-                    .ok()
-                    .and_then(|contents| cursor_cache_owner(&contents));
-                let verified = owner.as_deref().is_some_and(|id| {
-                    store
-                        .as_ref()
-                        .is_some_and(|store| store.accounts.contains_key(id))
-                        && *path
-                            == cache_dir
-                                .join(format!("usage.{}.json", cursor_account_cache_stem(id)))
+                let owner_hash = cursor_cache_owner_hash_from_file(path);
+                let verified = owner_hash.as_deref().is_some_and(|hash| {
+                    store.as_ref().is_some_and(|store| {
+                        store.accounts.keys().any(|id| {
+                            cursor_cache_owner_hash(id) == hash
+                                && *path
+                                    == cache_dir.join(format!(
+                                        "usage.{}.json",
+                                        cursor_account_cache_stem(id)
+                                    ))
+                        })
+                    })
                 });
                 if !verified {
                     return false;
@@ -5218,17 +5326,27 @@ mod tests {
         assert_eq!(result.rows, 3);
         assert_eq!(result.error, None);
 
-        // JSON caches are written for each account and key by conversationId.
+        // JSON caches and their bounded owner indexes are written together.
+        let active_path = cache_dir.join("usage.json");
+        let secondary_path = cache_dir.join(format!(
+            "usage.{}.json",
+            cursor_account_cache_stem("team/account")
+        ));
         assert_eq!(
-            count_cursor_json_events(&fs::read_to_string(cache_dir.join("usage.json"))?),
+            count_cursor_json_events(&fs::read_to_string(&active_path)?),
             1
         );
         assert_eq!(
-            count_cursor_json_events(&fs::read_to_string(cache_dir.join(format!(
-                "usage.{}.json",
-                cursor_account_cache_stem("team/account")
-            )))?),
+            count_cursor_json_events(&fs::read_to_string(&secondary_path)?),
             2
+        );
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&active_path).as_deref(),
+            Some(cursor_cache_owner_hash("active-account").as_str())
+        );
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&secondary_path).as_deref(),
+            Some(cursor_cache_owner_hash("team/account").as_str())
         );
         // The active account is never duplicated as a per-account file.
         assert!(!cache_dir.join("usage.active-account.json").exists());
@@ -5307,9 +5425,15 @@ mod tests {
             ));
             assert!(result.synced, "secondary sync must succeed: {result:?}");
             assert_eq!(result.error.is_some(), active_fails);
+            let active_path = cache_dir.join("usage.json");
             assert_eq!(
-                fs::read_to_string(cache_dir.join("usage.json"))?,
-                active_json
+                cursor_cache_owner_hash_from_file(&active_path).as_deref(),
+                Some(cursor_cache_owner_hash(active_id).as_str())
+            );
+            assert!(
+                cached_usage_events(fs::read_to_string(&active_path).ok().as_deref())
+                    .iter()
+                    .any(|row| row["conversationId"] == "active-history")
             );
             assert_eq!(
                 fs::read(cursor_credentials_path(temp.path()))?,
@@ -5320,8 +5444,8 @@ mod tests {
                 cursor_account_cache_stem(secondary_id)
             ));
             assert_eq!(
-                fs::read_to_string(&secondary_path).ok().as_deref(),
-                Some(owned_cursor_cache(&secondary_json, secondary_id)?.as_str()),
+                cursor_cache_owner_hash_from_file(&secondary_path).as_deref(),
+                Some(cursor_cache_owner_hash(secondary_id).as_str()),
                 "cleanup must retain the freshly written secondary; active_fails={active_fails}"
             );
             let rows = tokscale_core::sessions::cursor::parse_cursor_file(&secondary_path);
@@ -6263,6 +6387,80 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn test_cursor_cache_owner_envelope_handles_long_and_escaped_account_ids() -> Result<()> {
+        let home = TempDir::new()?;
+        let path = home.path().join("usage.json");
+        let account_id = format!(
+            "team/\"{}é",
+            "x".repeat(CURSOR_CACHE_OWNER_ENVELOPE_BYTES * 2)
+        );
+        let owned = owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, &account_id)?;
+        assert!(owned.starts_with(r#"{"_owner":"#));
+        assert!(owned.contains(r#","zzTokscaleOwner":"#));
+        fs::write(&path, owned)?;
+
+        let expected_hash = cursor_cache_owner_hash(&account_id);
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&path).as_deref(),
+            Some(expected_hash.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_cursor_cache_owner_envelope_rejects_truncation_and_foreign_owner() -> Result<()> {
+        let home = TempDir::new()?;
+        let path = home.path().join("usage.json");
+        let owned_a = owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "account-a")?;
+        let owned_b = owned_cursor_cache(r#"{"usageEventsDisplay":[]}"#, "account-b")?;
+        assert_eq!(owned_a.len(), owned_b.len());
+
+        fs::write(&path, &owned_a)?;
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&path).as_deref(),
+            Some(cursor_cache_owner_hash("account-a").as_str())
+        );
+        fs::write(&path, &owned_b)?;
+        assert_eq!(
+            cursor_cache_owner_hash_from_envelope(&path).as_deref(),
+            Some(cursor_cache_owner_hash("account-b").as_str())
+        );
+
+        let mut mismatched: serde_json::Value = serde_json::from_str(&owned_a)?;
+        mismatched["zzTokscaleOwner"]["generation"] =
+            serde_json::json!("00000000-0000-0000-0000-000000000000");
+        fs::write(&path, serde_json::to_string(&mismatched)?)?;
+        assert_eq!(cursor_cache_owner_hash_from_envelope(&path), None);
+        assert_eq!(
+            cursor_cache_owner_hash_from_file(&path),
+            None,
+            "a cache advertising a broken envelope must not downgrade to legacy trust"
+        );
+
+        fs::write(&path, &owned_a.as_bytes()[..owned_a.len() - 1])?;
+        assert_eq!(cursor_cache_owner_hash_from_envelope(&path), None);
+        assert_eq!(cursor_cache_owner_hash_from_file(&path), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cursor_cache_owner_envelope_falls_back_for_valid_legacy_cache() -> Result<()> {
+        let home = TempDir::new()?;
+        let path = home.path().join("usage.json");
+        fs::write(
+            &path,
+            r#"{"_tokscale":{"version":1,"accountId":"legacy"},"usageEventsDisplay":[]}"#,
+        )?;
+        assert_eq!(cursor_cache_owner_hash_from_envelope(&path), None);
+        assert_eq!(
+            cursor_cache_owner_hash_from_file(&path).as_deref(),
+            Some(cursor_cache_owner_hash("legacy").as_str())
+        );
+        Ok(())
+    }
+
     fn collision_fixture_store(home: &Path) -> Result<CursorCredentialsStore> {
         let ids = ["team/account-a", "team@account-a", "TEAM_ACCOUNT_A"];
         let store = CursorCredentialsStore {
