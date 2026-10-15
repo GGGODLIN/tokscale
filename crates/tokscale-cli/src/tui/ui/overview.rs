@@ -3,8 +3,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use super::bar_chart::{render_stacked_bar_chart, ModelSegment, StackedBarData};
 use super::widgets::{
-    fit_workspace_label_to_width_with_marker, format_tokens, truncate_to_width,
-    viewport_scrollbar_state,
+    fit_workspace_label_to_width_with_marker, format_tokens,
+    truncate_ellipsis_to_width_with_marker, truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, ChartGranularity};
 use crate::tui::i18n::{tr, MessageKey};
@@ -170,7 +170,8 @@ fn render_legend(frame: &mut Frame, app: &App, area: Rect) {
 
     let mut spans: Vec<Span> = Vec::new();
     for (i, (model_name, color)) in top_models.iter().enumerate() {
-        let name = truncate_string(model_name, max_name_width, app.glyphs.ellipsis);
+        let name =
+            truncate_ellipsis_to_width_with_marker(model_name, max_name_width, app.glyphs.ellipsis);
 
         spans.push(Span::styled(
             app.glyphs.legend_dot,
@@ -433,20 +434,5 @@ fn render_top_models(frame: &mut Frame, app: &mut App, area: Rect, items_per_pag
             }),
             &mut scrollbar_state,
         );
-    }
-}
-
-fn truncate_string(s: &str, max_chars: usize, marker: &str) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let char_count = s.chars().count();
-    if char_count <= max_chars {
-        s.to_string()
-    } else if max_chars == 1 {
-        marker.to_string()
-    } else {
-        let head: String = s.chars().take(max_chars - 1).collect();
-        format!("{head}{marker}")
     }
 }

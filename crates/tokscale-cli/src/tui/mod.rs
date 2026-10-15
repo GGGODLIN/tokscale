@@ -337,7 +337,7 @@ pub fn run(
 
     let _ = execute!(stdout, SetTitle("Tokscale"));
 
-    if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
         let _ = disable_raw_mode();
         let _ = execute!(stdout, SetTitle(""));
         return Err(e.into());
@@ -352,6 +352,14 @@ pub fn run(
         glyph_probe::ProbeResult::default()
     };
     let ambient_width = probe.width;
+
+    // Mouse reporting starts only after the input-side probe. A physical click
+    // on the still-blank alternate screen must not become an escape sequence
+    // mixed into the cursor-position response.
+    if let Err(error) = execute!(stdout, EnableMouseCapture) {
+        restore_terminal_best_effort();
+        return Err(error.into());
+    }
 
     // From here on the TUI owns raw mode and the alternate screen for its
     // whole run. Background diagnostics (e.g. cache save warnings) must not

@@ -907,7 +907,7 @@ fn ms_to_local_naive(ms: i64) -> Option<NaiveDateTime> {
 }
 
 /// Human-readable elapsed time between first and last message in a session.
-/// Returns "—" when the bounds are missing or inverted.
+/// Returns the active missing-value marker when bounds are missing or inverted.
 fn format_duration(first_ms: i64, last_ms: i64, glyphs: crate::ui_glyphs::Glyphs) -> String {
     if first_ms <= 0 || last_ms <= 0 || last_ms < first_ms {
         return glyphs.missing.to_string();

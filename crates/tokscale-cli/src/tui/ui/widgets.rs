@@ -54,7 +54,7 @@ pub fn format_cost(cost: f64) -> String {
 }
 
 /// Cost per million tokens: useful for comparing model efficiency across sessions.
-/// Returns "—" when there are no tokens to avoid division by zero.
+/// Returns the active missing-value marker when there are no tokens.
 pub fn format_cost_per_million(cost: f64, total_tokens: u64, glyphs: Glyphs) -> String {
     if total_tokens == 0 || !cost.is_finite() || cost < 0.0 {
         return glyphs.missing.to_string();
@@ -560,6 +560,7 @@ pub(crate) fn truncate_ellipsis_with_marker(s: &str, max_chars: usize, marker: &
 /// East-Asian-Ambiguous and draws two cells in a CJK-locale terminal, which is
 /// exactly where the translated text this helper fits is read. A one-cell
 /// budget has to stay one cell there too.
+#[cfg(test)]
 pub(crate) fn truncate_ellipsis_to_width(s: &str, max_cells: usize) -> String {
     truncate_ellipsis_to_width_with_marker(s, max_cells, Glyphs::ascii_safe().ellipsis)
 }

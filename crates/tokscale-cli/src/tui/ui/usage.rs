@@ -11,7 +11,7 @@ use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::privacy::looks_like_email;
 use crate::tui::ui::widgets::{
     display_width, get_provider_shade, light_ratio_bar_spans, pad_start_to_width, pad_to_width,
-    truncate_ellipsis_to_width as truncate_string,
+    truncate_ellipsis_to_width_with_marker as truncate_string,
 };
 use crate::ui_glyphs::Glyphs;
 
@@ -588,7 +588,7 @@ fn push_click_buttons(
         let share = (text_budget / count).max(1) as usize;
         compact
             .into_iter()
-            .map(|label| truncate_string(&label, share))
+            .map(|label| truncate_string(&label, share, app.glyphs.ellipsis))
             .collect()
     };
 
@@ -694,8 +694,12 @@ fn render_codex_login_panel(frame: &mut Frame, app: &mut App, area: Rect) -> Rec
         // status pushes the action past the edge while its click area stays at
         // the edge, so the visible button and the clickable one disagree.
         let budget = area_width.saturating_sub(action_width + 1);
-        let title = truncate_string(&title, budget);
-        let status = truncate_string(status, budget.saturating_sub(display_width(&title)));
+        let title = truncate_string(&title, budget, app.glyphs.ellipsis);
+        let status = truncate_string(
+            status,
+            budget.saturating_sub(display_width(&title)),
+            app.glyphs.ellipsis,
+        );
         header_spans.push(Span::styled(title, title_style));
         header_spans.push(Span::styled(status, app.theme.subtle_text_style()));
         let used_width = Line::from(header_spans.clone()).width();
@@ -732,7 +736,11 @@ fn render_codex_login_panel(frame: &mut Frame, app: &mut App, area: Rect) -> Rec
             lines.push(Line::from(Span::styled(
                 format!(
                     "  {}",
-                    truncate_string(&line, area.width.saturating_sub(4) as usize)
+                    truncate_string(
+                        &line,
+                        area.width.saturating_sub(4) as usize,
+                        app.glyphs.ellipsis
+                    )
                 ),
                 Style::default().fg(app.theme.muted),
             )));
@@ -754,7 +762,7 @@ fn render_codex_login_panel(frame: &mut Frame, app: &mut App, area: Rect) -> Rec
             }
         };
         lines.push(Line::from(Span::styled(
-            truncate_string(&label, area.width as usize),
+            truncate_string(&label, area.width as usize, app.glyphs.ellipsis),
             style,
         )));
     }
@@ -825,7 +833,11 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(app.theme.muted),
                 )),
                 Line::from(Span::styled(
-                    truncate_string(&diagnostic.display_name(), area.width as usize),
+                    truncate_string(
+                        &diagnostic.display_name(),
+                        area.width as usize,
+                        app.glyphs.ellipsis,
+                    ),
                     Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
                 )),
             ]
@@ -838,11 +850,19 @@ fn render_empty(frame: &mut Frame, app: &App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
-                    truncate_string(&diagnostic.display_name(), area.width as usize),
+                    truncate_string(
+                        &diagnostic.display_name(),
+                        area.width as usize,
+                        app.glyphs.ellipsis,
+                    ),
                     Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
                 )),
                 Line::from(Span::styled(
-                    truncate_string(&diagnostic.message, area.width as usize),
+                    truncate_string(
+                        &diagnostic.message,
+                        area.width as usize,
+                        app.glyphs.ellipsis,
+                    ),
                     Style::default().fg(app.theme.muted),
                 )),
             ]
@@ -1049,6 +1069,7 @@ fn render_usage_status(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[
                     app.settings.tui_language,
                     hidden_count,
                     inner.width as usize,
+                    app.glyphs,
                 ));
             }
         }
@@ -1279,7 +1300,7 @@ fn append_usage_diagnostic_lines(
         app.usage_fetch_diagnostics.len().min(available)
     };
     for diagnostic in visible_usage_diagnostics(&app.usage_fetch_diagnostics, visible_count) {
-        lines.push(usage_diagnostic_line(diagnostic, width));
+        lines.push(usage_diagnostic_line(diagnostic, width, app.glyphs));
     }
 
     let hidden_count = app
@@ -1299,6 +1320,7 @@ fn append_usage_diagnostic_lines(
                     )
                 ),
                 width,
+                app.glyphs.ellipsis,
             ),
             app.theme.subtle_text_style(),
         )));
@@ -1332,11 +1354,15 @@ fn diagnostic_severity_rank(severity: UsageFetchDiagnosticSeverity) -> u8 {
     }
 }
 
-fn usage_diagnostic_line(diagnostic: &UsageFetchDiagnostic, width: usize) -> Line<'static> {
+fn usage_diagnostic_line(
+    diagnostic: &UsageFetchDiagnostic,
+    width: usize,
+    glyphs: Glyphs,
+) -> Line<'static> {
     let label = diagnostic.display_name();
     let text = format!("  {label}: {}", diagnostic.message);
     Line::from(Span::styled(
-        truncate_string(&text, width),
+        truncate_string(&text, width, glyphs.ellipsis),
         Style::default().fg(diagnostic_severity_color(diagnostic.severity)),
     ))
 }
@@ -1418,7 +1444,10 @@ fn push_kv_styled(
             format!("  {}{}", key, padding),
             app.theme.subtle_text_style(),
         ),
-        Span::styled(truncate_string(value, max_value), value_style),
+        Span::styled(
+            truncate_string(value, max_value, app.glyphs.ellipsis),
+            value_style,
+        ),
     ]));
 }
 
@@ -1488,6 +1517,7 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
     let readiness = truncate_string(
         readiness_label(app.settings.tui_language, status),
         readiness_width,
+        app.glyphs.ellipsis,
     );
     Line::from(vec![
         Span::raw("  "),
@@ -1497,13 +1527,17 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
         ),
         Span::styled(
             pad_to_width(
-                &truncate_string(&account_name(app, output), account_width.saturating_sub(1)),
+                &truncate_string(
+                    &account_name(app, output),
+                    account_width.saturating_sub(1),
+                    app.glyphs.ellipsis,
+                ),
                 account_width,
             ),
             app.theme.secondary_text_style(),
         ),
         Span::styled(
-            truncate_string(&detail, width.saturating_sub(used + 1)),
+            truncate_string(&detail, width.saturating_sub(used + 1), app.glyphs.ellipsis),
             metric
                 .map(|metric| Style::default().fg(metric_color(app, metric)))
                 .unwrap_or_else(|| app.theme.subtle_text_style()),
@@ -1511,7 +1545,12 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
     ])
 }
 
-fn attention_more_line(lang: TuiLanguage, hidden_count: usize, width: usize) -> Line<'static> {
+fn attention_more_line(
+    lang: TuiLanguage,
+    hidden_count: usize,
+    width: usize,
+    glyphs: Glyphs,
+) -> Line<'static> {
     let label = more_count_label(
         lang,
         hidden_count,
@@ -1519,7 +1558,10 @@ fn attention_more_line(lang: TuiLanguage, hidden_count: usize, width: usize) -> 
         MessageKey::UsageMoreAtRiskPlural,
     );
     Line::from(Span::styled(
-        format!("  {}", truncate_string(&label, width.saturating_sub(2))),
+        format!(
+            "  {}",
+            truncate_string(&label, width.saturating_sub(2), glyphs.ellipsis)
+        ),
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -1564,7 +1606,10 @@ fn provider_summary_line(
     };
     Line::from(vec![
         Span::styled(
-            format!("  {}", truncate_string(group.provider, 18)),
+            format!(
+                "  {}",
+                truncate_string(group.provider, 18, app.glyphs.ellipsis)
+            ),
             Style::default()
                 .fg(app.theme.color(get_provider_shade(group.provider, 0)))
                 .add_modifier(Modifier::BOLD),
@@ -1589,7 +1634,11 @@ fn render_selected_account(
         .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
-            truncate_string(&title, area.width.saturating_sub(4) as usize),
+            truncate_string(
+                &title,
+                area.width.saturating_sub(4) as usize,
+                app.glyphs.ellipsis,
+            ),
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -1742,6 +1791,7 @@ fn append_selected_reset_credit_lines(
                 tr(app.settings.tui_language, MessageKey::CreditExpiryUnknown),
                 app.theme.subtle_text_style(),
                 width,
+                app.glyphs,
             ));
         }
         return;
@@ -1767,6 +1817,7 @@ fn append_selected_reset_credit_lines(
             &format_selected_reset_schedule_entry(app.settings.tui_language, bucket),
             app.theme.secondary_text_style(),
             width,
+            app.glyphs,
         ));
     }
 
@@ -1781,16 +1832,26 @@ fn append_selected_reset_credit_lines(
             ),
             app.theme.subtle_text_style(),
             width,
+            app.glyphs,
         ));
     }
 }
 
-fn selected_reset_schedule_line(value: &str, value_style: Style, width: usize) -> Line<'static> {
+fn selected_reset_schedule_line(
+    value: &str,
+    value_style: Style,
+    width: usize,
+    glyphs: Glyphs,
+) -> Line<'static> {
     let prefix_width = 14usize;
     Line::from(vec![
         Span::raw(" ".repeat(prefix_width)),
         Span::styled(
-            truncate_string(value, width.saturating_sub(prefix_width + 2)),
+            truncate_string(
+                value,
+                width.saturating_sub(prefix_width + 2),
+                glyphs.ellipsis,
+            ),
             value_style,
         ),
     ])
@@ -1841,6 +1902,7 @@ fn append_credit_bank_summary_lines(
             truncate_string(
                 &reset_bank_summary(app.settings.tui_language, outputs, app.glyphs),
                 width.saturating_sub(15),
+                app.glyphs.ellipsis,
             ),
             Style::default()
                 .fg(Color::Yellow)
@@ -1893,7 +1955,10 @@ fn reset_credit_account_line(
     // panel, where ratatui clipped it with no marker while en/fr got an
     // ellipsis. Measuring in cells is exactly `{:<width$}` for ASCII, so `en` is
     // unchanged for every possible count.
-    let count_cell = pad_to_width(&truncate_string(&count, count_width), count_width);
+    let count_cell = pad_to_width(
+        &truncate_string(&count, count_width, app.glyphs.ellipsis),
+        count_width,
+    );
     let used = 2 + label_width + count_width + 2;
     let expiry = credit_nearest_expiry_line(app.settings.tui_language, credits);
     let marker = if selected { "> " } else { "  " };
@@ -1901,7 +1966,7 @@ fn reset_credit_account_line(
         Span::raw(marker),
         Span::styled(
             pad_to_width(
-                &truncate_string(&account, label_width.saturating_sub(1)),
+                &truncate_string(&account, label_width.saturating_sub(1), app.glyphs.ellipsis),
                 label_width,
             ),
             Style::default()
@@ -1910,7 +1975,7 @@ fn reset_credit_account_line(
         ),
         Span::styled(count_cell, app.theme.secondary_text_style()),
         Span::styled(
-            truncate_string(&expiry, width.saturating_sub(used)),
+            truncate_string(&expiry, width.saturating_sub(used), app.glyphs.ellipsis),
             app.theme.secondary_text_style(),
         ),
     ])
@@ -2112,7 +2177,7 @@ fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'stat
         }
     );
     Line::from(Span::styled(
-        truncate_string(&summary, width),
+        truncate_string(&summary, width, app.glyphs.ellipsis),
         app.theme.subtle_text_style(),
     ))
 }
@@ -2141,6 +2206,7 @@ fn metric_detail_line(app: &App, metric: &UsageMetric, width: usize) -> Line<'st
                 &truncate_string(
                     &compact_metric_label(&metric.label),
                     label_width.saturating_sub(1),
+                    app.glyphs.ellipsis,
                 ),
                 label_width,
             )
@@ -2156,11 +2222,11 @@ fn metric_detail_line(app: &App, metric: &UsageMetric, width: usize) -> Line<'st
     spans.extend([
         Span::raw(" "),
         Span::styled(
-            pad_to_width(&truncate_string(&remaining, 11), 11),
+            pad_to_width(&truncate_string(&remaining, 11, app.glyphs.ellipsis), 11),
             Style::default().fg(color),
         ),
         Span::styled(
-            truncate_string(&reset, reset_width),
+            truncate_string(&reset, reset_width, app.glyphs.ellipsis),
             app.theme.subtle_text_style(),
         ),
     ]);
@@ -2310,7 +2376,7 @@ fn narrow_table_header(app: &App, width: u16) -> Line<'static> {
     let lang = app.settings.tui_language;
     let label = format!(" #  {}", tr(lang, MessageKey::UsageAccountOrStatus));
     Line::from(Span::styled(
-        truncate_string(&label, width as usize),
+        truncate_string(&label, width as usize, app.glyphs.ellipsis),
         app.theme.subtle_text_style(),
     ))
 }
@@ -2370,7 +2436,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
         ),
         styled(
             pad_to_width(
-                &truncate_string(&left, left_width.saturating_sub(1)),
+                &truncate_string(&left, left_width.saturating_sub(1), app.glyphs.ellipsis),
                 left_width,
             ),
             app.theme.secondary_text_style(),
@@ -2384,7 +2450,10 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
         // column — and ratatui then clipped it at the panel edge with no
         // marker, the same failure mode as the Korean `메시지` header.
         first.push(styled(
-            pad_start_to_width(&truncate_string(&state, state_width), state_width),
+            pad_start_to_width(
+                &truncate_string(&state, state_width, app.glyphs.ellipsis),
+                state_width,
+            ),
             Style::default().fg(readiness_color(app, row.readiness)),
             selected,
         ));
@@ -2422,7 +2491,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     let mut second = vec![
         styled("    ", Style::default(), selected),
         styled(
-            truncate_string(&detail, detail_width.saturating_sub(1)),
+            truncate_string(&detail, detail_width.saturating_sub(1), app.glyphs.ellipsis),
             detail_style,
             selected,
         ),
@@ -2480,7 +2549,7 @@ fn metric_summary(lang: TuiLanguage, output: &UsageOutput, glyphs: Glyphs) -> St
         .iter()
         .map(|metric| {
             let label = compact_metric_label(&metric.label);
-            let label = truncate_string(&label, 14);
+            let label = truncate_string(&label, 14, glyphs.ellipsis);
             format!("{label} {:.0}%", metric.remaining_percent)
         })
         .collect::<Vec<_>>();
@@ -2804,7 +2873,7 @@ fn output_reset_label(app: &App, output: &UsageOutput) -> Option<String> {
     let reset = metric.resets_at.as_ref()?;
     Some(format!(
         "{} {separator} {}",
-        truncate_string(&account_name(app, output), 22),
+        truncate_string(&account_name(app, output), 22, app.glyphs.ellipsis),
         helpers::format_reset_time(reset)
     ))
 }
@@ -3338,7 +3407,8 @@ mod tests {
 
     #[test]
     fn usage_quota_bar_uses_light_empty_track() {
-        let app = make_app();
+        let mut app = make_app();
+        app.glyphs = Glyphs::unicode();
         let metric = UsageMetric {
             label: "Session".to_string(),
             used_percent: 50.0,
@@ -3358,7 +3428,8 @@ mod tests {
 
     #[test]
     fn usage_quota_bar_uses_trace_mark_for_sub_cell_remaining() {
-        let app = make_app();
+        let mut app = make_app();
+        app.glyphs = Glyphs::unicode();
         let spans = quota_bar_spans(0.1, 20, Color::Red, &app);
         let text = spans
             .iter()
@@ -3368,6 +3439,22 @@ mod tests {
         assert!(text.contains("▏"), "{text}");
         assert!(!text.contains("█"), "{text}");
         assert_eq!(text.chars().count(), 20);
+    }
+
+    #[test]
+    fn safe_quota_bar_uses_background_cells_without_ambiguous_blocks() {
+        let app = make_app();
+        let spans = quota_bar_spans(50.0, 20, Color::Red, &app);
+        assert!(spans.iter().any(|span| span.style.bg == Some(Color::Red)));
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!text.contains('█'));
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(text.as_str()),
+            unicode_width::UnicodeWidthStr::width_cjk(text.as_str()),
+        );
     }
 
     #[test]
@@ -5066,7 +5153,8 @@ mod tests {
                         continue; // no state column at this width
                     };
 
-                    let fitted = truncate_string(&state, state_width);
+                    let fitted =
+                        truncate_string(&state, state_width, Glyphs::ascii_safe().ellipsis);
                     assert!(
                         display_width(&fitted) <= state_width,
                         "{} at {frame_width}: state {state:?} still needs {} cells in a \

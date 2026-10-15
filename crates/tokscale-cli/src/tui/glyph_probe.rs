@@ -57,6 +57,11 @@ fn probe_tty(output: &mut impl Write) -> io::Result<ProbeResult> {
     // launches do not emit a probe at all.
     let tty = OpenOptions::new().read(true).open("/dev/tty")?;
     let nonblocking = NonblockingGuard::new(tty.as_raw_fd())?;
+    // Never steal input that was already waiting before the probe began. Auto
+    // falls back to Unknown and the normal crossterm reader receives it intact.
+    if input_is_ready(nonblocking.fd)? {
+        return Ok(ProbeResult::default());
+    }
 
     let query_result = output
         .write_all(PROBE_PREFIX)
@@ -80,9 +85,13 @@ fn probe_tty(output: &mut impl Write) -> io::Result<ProbeResult> {
     query_result?;
     cleanup_result?;
 
+    let mut pending = read.pending;
+    if read.position.is_none() {
+        strip_partial_dsr(&mut pending);
+    }
     Ok(ProbeResult {
         width: classify_position(read.position),
-        pending_keys: decode_pending_keys(&read.pending),
+        pending_keys: decode_pending_keys(&pending),
     })
 }
 
@@ -120,8 +129,25 @@ impl Drop for NonblockingGuard {
 }
 
 #[cfg(unix)]
+fn input_is_ready(fd: std::os::fd::RawFd) -> io::Result<bool> {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `descriptor` is a valid one-element pollfd array and poll does
+    // not retain its pointer.
+    let result = unsafe { libc::poll(&mut descriptor, 1, 0) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result > 0)
+    }
+}
+
+#[cfg(unix)]
 fn poll_and_read(fd: std::os::fd::RawFd, remaining: Duration) -> io::Result<Option<Vec<u8>>> {
-    let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+    let timeout_ms = remaining.as_millis().min(i32::MAX as u128) as i32;
     let mut descriptor = libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -209,34 +235,50 @@ where
         return DsrRead::default();
     };
     let mut parser = DsrParser::default();
+    let mut position = None;
+    let mut scan_from = 0;
 
     loop {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return DsrRead {
-                position: None,
+                position,
                 pending: parser.pending,
             };
         };
         if remaining.is_zero() {
             return DsrRead {
-                position: None,
+                position,
                 pending: parser.pending,
             };
         }
 
         match next_chunk(remaining) {
             Ok(Some(bytes)) => {
-                if let Some((position, response_range)) = parser.push(&bytes) {
-                    parser.pending.drain(response_range);
+                parser.pending.extend_from_slice(&bytes);
+                if position.is_none() {
+                    if let Some((found, response_range)) = find_dsr_from(&parser.pending, scan_from)
+                    {
+                        parser.pending.drain(response_range);
+                        position = Some(found);
+                    } else {
+                        // A response can begin at the final ESC of this chunk.
+                        // Rescan only that boundary byte with the next chunk.
+                        scan_from = parser.pending.len().saturating_sub(32);
+                    }
+                }
+                // A key can be split across the same fd reads as the DSR. Once
+                // the response is gone, keep reading within the original
+                // deadline until every retained key sequence is complete.
+                if position.is_some() && pending_input_is_complete(&parser.pending) {
                     return DsrRead {
-                        position: Some(position),
+                        position,
                         pending: parser.pending,
                     };
                 }
             }
             Ok(None) | Err(_) => {
                 return DsrRead {
-                    position: None,
+                    position,
                     pending: parser.pending,
                 };
             }
@@ -250,7 +292,7 @@ struct DsrParser {
     pending: Vec<u8>,
 }
 
-#[cfg(any(unix, test))]
+#[cfg(test)]
 impl DsrParser {
     fn push(&mut self, bytes: &[u8]) -> Option<((u16, u16), std::ops::Range<usize>)> {
         self.pending.extend_from_slice(bytes);
@@ -263,9 +305,14 @@ fn parse_dsr(bytes: &[u8]) -> Option<(u16, u16)> {
     find_dsr(bytes).map(|(position, _)| position)
 }
 
-#[cfg(any(unix, test))]
+#[cfg(test)]
 fn find_dsr(bytes: &[u8]) -> Option<((u16, u16), std::ops::Range<usize>)> {
-    for start in 0..bytes.len().saturating_sub(1) {
+    find_dsr_from(bytes, 0)
+}
+
+#[cfg(any(unix, test))]
+fn find_dsr_from(bytes: &[u8], scan_from: usize) -> Option<((u16, u16), std::ops::Range<usize>)> {
+    for start in scan_from..bytes.len().saturating_sub(1) {
         if bytes.get(start..start + 2) != Some(b"\x1b[") {
             continue;
         }
@@ -307,6 +354,61 @@ fn parse_u16_ascii(bytes: &[u8]) -> Option<u16> {
     })
 }
 
+#[cfg(any(unix, test))]
+fn strip_partial_dsr(bytes: &mut Vec<u8>) {
+    let Some(start) = bytes.windows(2).rposition(|window| window == b"\x1b[") else {
+        return;
+    };
+    let tail = &bytes[start + 2..];
+    let semicolons = tail.iter().filter(|byte| **byte == b';').count();
+    if semicolons <= 1
+        && tail
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || *byte == b';')
+    {
+        bytes.truncate(start);
+    }
+}
+
+#[cfg(any(unix, test))]
+fn pending_input_is_complete(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"\x1b[200~") {
+            let Some(end) = find_subslice(&bytes[index + 6..], b"\x1b[201~") else {
+                return false;
+            };
+            index += 6 + end + 6;
+            continue;
+        }
+        if bytes[index] == b'\x1b' {
+            let Some((_, consumed)) = decode_escape_key(&bytes[index..]) else {
+                return false;
+            };
+            index += consumed;
+            continue;
+        }
+        if bytes[index].is_ascii() {
+            index += 1;
+            continue;
+        }
+        match std::str::from_utf8(&bytes[index..]) {
+            Ok(_) => return true,
+            Err(error) if error.valid_up_to() > 0 => index += error.valid_up_to(),
+            Err(error) if error.error_len().is_none() => return false,
+            Err(error) => index += error.error_len().unwrap_or(1),
+        }
+    }
+    true
+}
+
+#[cfg(any(unix, test))]
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
 /// Convert non-DSR bytes read during the probe back into the key events the
 /// event loop would otherwise have received. The probe is short, but startup
 /// typing must not disappear merely because a cursor report shared its read.
@@ -315,6 +417,16 @@ fn decode_pending_keys(bytes: &[u8]) -> Vec<KeyEvent> {
     let mut keys = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
+        // Bracketed paste is ignored by the live EventHandler. Drop the whole
+        // wrapped payload here too, rather than turning pasted hotkeys into
+        // commands during startup.
+        if bytes[index..].starts_with(b"\x1b[200~") {
+            let Some(end) = find_subslice(&bytes[index + 6..], b"\x1b[201~") else {
+                break;
+            };
+            index += 6 + end + 6;
+            continue;
+        }
         if bytes[index] == b'\x1b' {
             if let Some((key, consumed)) = decode_escape_key(&bytes[index..]) {
                 if let Some(key) = key {
@@ -379,6 +491,70 @@ fn decode_pending_keys(bytes: &[u8]) -> Vec<KeyEvent> {
 /// wrapper (currently bracketed-paste start/end) that should be removed while
 /// preserving the text between its two markers.
 #[cfg(any(unix, test))]
+fn decode_csi_key(bytes: &[u8]) -> Option<KeyEvent> {
+    let length = csi_sequence_len(bytes)?;
+    let final_byte = bytes[length - 1];
+    let params = std::str::from_utf8(&bytes[..length - 1]).ok()?;
+    let numbers: Vec<u16> = if params.is_empty() {
+        Vec::new()
+    } else {
+        params
+            .split(';')
+            .map(|part| part.parse::<u16>().ok())
+            .collect::<Option<_>>()?
+    };
+    let modifiers = csi_modifiers(numbers.get(1).copied());
+    let code = match final_byte {
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'C' => KeyCode::Right,
+        b'D' => KeyCode::Left,
+        b'H' => KeyCode::Home,
+        b'F' => KeyCode::End,
+        b'Z' => KeyCode::BackTab,
+        b'~' => match numbers.first().copied()? {
+            2 => KeyCode::Insert,
+            3 => KeyCode::Delete,
+            5 => KeyCode::PageUp,
+            6 => KeyCode::PageDown,
+            15 => KeyCode::F(5),
+            17 => KeyCode::F(6),
+            18 => KeyCode::F(7),
+            19 => KeyCode::F(8),
+            20 => KeyCode::F(9),
+            21 => KeyCode::F(10),
+            23 => KeyCode::F(11),
+            24 => KeyCode::F(12),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(KeyEvent::new(code, modifiers))
+}
+
+#[cfg(any(unix, test))]
+fn csi_modifiers(value: Option<u16>) -> KeyModifiers {
+    match value.unwrap_or(1) {
+        2 => KeyModifiers::SHIFT,
+        3 => KeyModifiers::ALT,
+        4 => KeyModifiers::SHIFT | KeyModifiers::ALT,
+        5 => KeyModifiers::CONTROL,
+        6 => KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+        7 => KeyModifiers::ALT | KeyModifiers::CONTROL,
+        8 => KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL,
+        _ => KeyModifiers::NONE,
+    }
+}
+
+#[cfg(any(unix, test))]
+fn csi_sequence_len(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .iter()
+        .position(|byte| (0x40..=0x7e).contains(byte))
+        .map(|index| index + 1)
+}
+
+#[cfg(any(unix, test))]
 fn decode_escape_key(bytes: &[u8]) -> Option<(Option<KeyEvent>, usize)> {
     let simple = |code, consumed| Some((Some(KeyEvent::new(code, KeyModifiers::NONE)), consumed));
     match bytes {
@@ -392,9 +568,14 @@ fn decode_escape_key(bytes: &[u8]) -> Option<(Option<KeyEvent>, usize)> {
         [0x1b, b'[', b'3', b'~', ..] => simple(KeyCode::Delete, 4),
         [0x1b, b'[', b'5', b'~', ..] => simple(KeyCode::PageUp, 4),
         [0x1b, b'[', b'6', b'~', ..] => simple(KeyCode::PageDown, 4),
-        [0x1b, b'[', b'2', b'0', b'0', b'~', ..] | [0x1b, b'[', b'2', b'0', b'1', b'~', ..] => {
-            Some((None, 6))
+        [0x1b, b'[', rest @ ..] => {
+            csi_sequence_len(rest).map(|length| (decode_csi_key(&rest[..length]), length + 2))
         }
+        [0x1b, b'O', b'P', ..] => simple(KeyCode::F(1), 3),
+        [0x1b, b'O', b'Q', ..] => simple(KeyCode::F(2), 3),
+        [0x1b, b'O', b'R', ..] => simple(KeyCode::F(3), 3),
+        [0x1b, b'O', b'S', ..] => simple(KeyCode::F(4), 3),
+        [0x1b, b'O', _, ..] => Some((None, 3)),
         [0x1b, byte, ..] if byte.is_ascii_graphic() => Some((
             Some(KeyEvent::new(
                 KeyCode::Char(char::from(*byte)),
@@ -442,18 +623,49 @@ mod tests {
     }
 
     #[test]
-    fn preserves_control_utf8_alt_and_pasted_text() {
-        let keys = decode_pending_keys(b"\x03\x1bx\x1b[200~h\xc3\xa9\x1b[201~");
+    fn preserves_control_and_alt_but_ignores_bracketed_paste_like_live_input() {
+        let keys = decode_pending_keys(b"\x03\x1bx\x1b[200~hq\xc3\xa9\x1b[201~");
         assert_eq!(
-            keys[0],
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+            keys,
+            [
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+            ]
         );
+    }
+
+    #[test]
+    fn completes_utf8_and_arrow_sequences_split_around_the_cursor_report() {
+        let mut utf8_chunks = vec![b"\xc3\x1b[1;2R".to_vec(), b"\xa9".to_vec()].into_iter();
+        let utf8 = read_dsr_with_timeout(Duration::from_millis(20), |_| Ok(utf8_chunks.next()));
         assert_eq!(
-            keys[1],
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)
+            decode_pending_keys(&utf8.pending)[0].code,
+            KeyCode::Char('é')
         );
-        assert_eq!(keys[2].code, KeyCode::Char('h'));
-        assert_eq!(keys[3].code, KeyCode::Char('é'));
+
+        let mut arrow_chunks = vec![b"\x1b[\x1b[1;2R".to_vec(), b"A".to_vec()].into_iter();
+        let arrow = read_dsr_with_timeout(Duration::from_millis(20), |_| Ok(arrow_chunks.next()));
+        assert_eq!(decode_pending_keys(&arrow.pending)[0].code, KeyCode::Up);
+    }
+
+    #[test]
+    fn strips_only_a_trailing_partial_cursor_report() {
+        let mut bytes = b"q\x1b[12;".to_vec();
+        strip_partial_dsr(&mut bytes);
+        assert_eq!(bytes, b"q");
+
+        let mut arrow = b"\x1b[1;5A".to_vec();
+        strip_partial_dsr(&mut arrow);
+        assert_eq!(arrow, b"\x1b[1;5A");
+    }
+
+    #[test]
+    fn preserves_shift_tab_function_and_modified_arrow_keys() {
+        let keys = decode_pending_keys(b"\x1b[Z\x1bOP\x1b[1;5A");
+        assert_eq!(keys[0].code, KeyCode::BackTab);
+        assert_eq!(keys[1].code, KeyCode::F(1));
+        assert_eq!(keys[2].code, KeyCode::Up);
+        assert_eq!(keys[2].modifiers, KeyModifiers::CONTROL);
     }
 
     #[test]
