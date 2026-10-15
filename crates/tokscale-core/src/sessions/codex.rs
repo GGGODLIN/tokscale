@@ -895,6 +895,12 @@ fn read_bounded_jsonl_line<R: BufRead>(
         let (take, has_newline) = {
             let available = reader.fill_buf()?;
             if available.is_empty() {
+                if !oversized && !utf8_tail.is_empty() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "incomplete UTF-8 at end of JSONL record",
+                    ));
+                }
                 return Ok(if consumed == 0 {
                     BoundedJsonlRead::Eof
                 } else if oversized {
@@ -908,7 +914,12 @@ fn read_bounded_jsonl_line<R: BufRead>(
                 .position(|byte| *byte == b'\n')
                 .map_or(available.len(), |index| index + 1);
             if !oversized {
-                if line.len().saturating_add(take) > max_bytes {
+                if line
+                    .len()
+                    .saturating_add(utf8_tail.len())
+                    .saturating_add(take)
+                    > max_bytes
+                {
                     oversized = true;
                 } else {
                     let mut utf8 = Vec::with_capacity(utf8_tail.len() + take);
@@ -2616,6 +2627,22 @@ mod tests {
         file.write_all(content.as_bytes()).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    #[test]
+    fn bounded_jsonl_reader_preserves_utf8_split_across_chunks() {
+        let input = "a한b\n";
+        let mut reader = std::io::BufReader::with_capacity(2, Cursor::new(input.as_bytes()));
+        let mut line = String::new();
+
+        let result = read_bounded_jsonl_line(&mut reader, &mut line, input.len()).unwrap();
+
+        assert!(matches!(result, BoundedJsonlRead::Line(bytes) if bytes == input.len() as u64));
+        assert_eq!(line, input);
+        assert!(matches!(
+            read_bounded_jsonl_line(&mut reader, &mut line, input.len()).unwrap(),
+            BoundedJsonlRead::Eof
+        ));
     }
 
     const UNMETERED_ACTIVITY: &str = concat!(
