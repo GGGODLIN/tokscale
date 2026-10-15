@@ -938,6 +938,7 @@ Tokscale stores settings in `settings.json` in its config directory. By default 
 ```json
 {
   "colorPalette": "blue",
+  "glyphs": "auto",
   "includeUnusedModels": false,
   "defaultClients": ["opencode", "claude"],
   "usage": {
@@ -961,6 +962,7 @@ Tokscale stores settings in `settings.json` in its config directory. By default 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `colorPalette` | string | `"blue"` | TUI color theme (green, halloween, teal, blue, pink, purple, orange, monochrome, ylgnbu, graphite, lagoon, dusk, tokyo-night, catppuccin, solarized, gruvbox, gruvbox-material, one-dark) |
+| `glyphs` | `"auto"` \| `"unicode"` \| `"ascii"` | `"auto"` | TUI glyph policy. `auto` probes the terminal's ambiguous-character width at startup; use `unicode` or `ascii` to override detection for terminals that do not answer the probe correctly. Invalid values safely fall back to `auto`. |
 | `includeUnusedModels` | boolean | `false` | Show models with zero tokens in reports |
 | `autoRefreshEnabled` | boolean | `false` | Enable auto-refresh in TUI |
 | `autoRefreshMs` | number | `60000` | Auto-refresh interval (30000-3600000ms) |

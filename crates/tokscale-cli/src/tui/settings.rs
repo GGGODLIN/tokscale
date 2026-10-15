@@ -183,6 +183,15 @@ impl ExplicitHomeConfigLayout {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GlyphMode {
+    #[default]
+    Auto,
+    Unicode,
+    Ascii,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LightSettings {
@@ -306,6 +315,11 @@ impl AutosubmitSettings {
 pub struct Settings {
     #[serde(default = "default_color_palette")]
     pub color_palette: String,
+    /// Glyph policy for app-owned TUI chrome. `Auto` uses terminal capability
+    /// detection; the explicit variants let users override an unknown or
+    /// incorrectly reported terminal width policy.
+    #[serde(default, deserialize_with = "deserialize_glyph_mode_lossy")]
+    pub glyphs: GlyphMode,
     #[serde(default)]
     pub auto_refresh_enabled: bool,
     #[serde(default = "default_auto_refresh_ms")]
@@ -369,6 +383,20 @@ pub struct Settings {
     /// Cursor integration preferences, e.g. the explicit sync budget.
     #[serde(default, deserialize_with = "deserialize_cursor_settings_lossy")]
     pub cursor: CursorSettings,
+}
+
+/// Lossy deserializer for `glyphs`: a typo or a non-string value falls back
+/// to auto-detection without invalidating unrelated settings.
+fn deserialize_glyph_mode_lossy<'de, D>(deserializer: D) -> Result<GlyphMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer).ok().flatten();
+    Ok(match value.as_ref().and_then(serde_json::Value::as_str) {
+        Some("unicode") => GlyphMode::Unicode,
+        Some("ascii") => GlyphMode::Ascii,
+        Some("auto") | _ => GlyphMode::Auto,
+    })
 }
 
 /// Lossy deserializer for the `cursor` section. Settings without a `cursor`
@@ -456,6 +484,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             color_palette: default_color_palette(),
+            glyphs: GlyphMode::Auto,
             auto_refresh_enabled: false,
             auto_refresh_ms: DEFAULT_AUTO_REFRESH_MS,
             include_unused_models: false,
@@ -1075,6 +1104,51 @@ mod tests {
                 None => env::remove_var("TOKSCALE_CONFIG_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn settings_glyphs_defaults_to_auto_when_missing() {
+        let parsed: Settings = serde_json::from_str(r#"{"colorPalette":"blue"}"#).unwrap();
+        assert_eq!(parsed.glyphs, GlyphMode::Auto);
+    }
+
+    #[test]
+    fn settings_glyphs_accepts_each_persisted_mode() {
+        for (value, expected) in [
+            ("auto", GlyphMode::Auto),
+            ("unicode", GlyphMode::Unicode),
+            ("ascii", GlyphMode::Ascii),
+        ] {
+            let json = format!(r#"{{"glyphs":"{value}"}}"#);
+            let parsed: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.glyphs, expected);
+        }
+    }
+
+    #[test]
+    fn settings_glyphs_is_lossy_without_wiping_other_preferences() {
+        for malformed in [r#""wide""#, "17", "null", r#"{"mode":"ascii"}"#] {
+            let json = format!(
+                r#"{{"colorPalette":"halloween","glyphs":{malformed},"minutelyTabEnabled":true}}"#
+            );
+            let parsed: Settings = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed.glyphs, GlyphMode::Auto);
+            assert_eq!(parsed.color_palette, "halloween");
+            assert!(parsed.minutely_tab_enabled);
+        }
+    }
+
+    #[test]
+    fn settings_glyphs_serializes_as_lowercase_string() {
+        let settings = Settings {
+            glyphs: GlyphMode::Ascii,
+            ..Settings::default()
+        };
+        let value = serde_json::to_value(settings).unwrap();
+        assert_eq!(
+            value.get("glyphs").and_then(|value| value.as_str()),
+            Some("ascii")
+        );
     }
 
     #[test]

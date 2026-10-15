@@ -130,6 +130,7 @@ reqwest = { workspace = true, features = ["native-tls-vendored"] }
 windows-sys = { version = "0.61", features = ["Win32_Security_Credentials"] }
 
 [target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 signal-hook = { workspace = true }
 
 [dev-dependencies]
