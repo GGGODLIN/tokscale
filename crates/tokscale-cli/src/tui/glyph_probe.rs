@@ -145,11 +145,13 @@ fn probe_tty(output: &mut impl Write) -> io::Result<AmbientWidth> {
 
     // Windows consoles expose the cursor position synchronously through the
     // console API, so crossterm does not need an input-side DSR round trip.
-    let position = query_result.as_ref().ok().and_then(|()| {
+    let position = if query_result.is_ok() {
         crossterm::cursor::position()
             .ok()
             .map(|(column, row)| (row.saturating_add(1), column.saturating_add(1)))
-    });
+    } else {
+        None
+    };
 
     let cleanup_result = output
         .write_all(PROBE_CLEANUP)
