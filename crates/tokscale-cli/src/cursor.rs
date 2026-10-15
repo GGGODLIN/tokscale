@@ -993,9 +993,42 @@ fn cursor_cache_owner_hash_from_envelope(path: &Path) -> Option<String> {
     .then_some(header.owner_hash)
 }
 
+fn cursor_cache_advertises_owner_envelope(path: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let mut prefix = Vec::with_capacity(CURSOR_CACHE_OWNER_ENVELOPE_BYTES);
+    if (&mut file)
+        .take(CURSOR_CACHE_OWNER_ENVELOPE_BYTES as u64)
+        .read_to_end(&mut prefix)
+        .is_err()
+    {
+        return false;
+    }
+    if prefix.starts_with(CURSOR_CACHE_OWNER_HEADER_PREFIX) {
+        return true;
+    }
+
+    let suffix_len = file_len.min(CURSOR_CACHE_OWNER_ENVELOPE_BYTES as u64) as usize;
+    if file.seek(SeekFrom::End(-(suffix_len as i64))).is_err() {
+        return false;
+    }
+    let mut suffix = vec![0; suffix_len];
+    file.read_exact(&mut suffix).is_ok()
+        && suffix
+            .windows(CURSOR_CACHE_OWNER_FOOTER_PREFIX.len())
+            .any(|window| window == CURSOR_CACHE_OWNER_FOOTER_PREFIX)
+}
+
 fn cursor_cache_owner_hash_from_file(path: &Path) -> Option<String> {
     if let Some(owner_hash) = cursor_cache_owner_hash_from_envelope(path) {
         return Some(owner_hash);
+    }
+    if cursor_cache_advertises_owner_envelope(path) {
+        return None;
     }
     let contents = fs::read_to_string(path).ok()?;
     legacy_cursor_cache_owner(&contents).map(|account_id| cursor_cache_owner_hash(&account_id))
@@ -6432,6 +6465,7 @@ mod tests {
         mismatched["zzTokscaleOwner"]["generation"] =
             serde_json::json!("00000000-0000-0000-0000-000000000000");
         fs::write(&path, serde_json::to_string(&mismatched)?)?;
+        assert!(cursor_cache_advertises_owner_envelope(&path));
         assert_eq!(cursor_cache_owner_hash_from_envelope(&path), None);
         assert_eq!(
             cursor_cache_owner_hash_from_file(&path),
@@ -6453,6 +6487,7 @@ mod tests {
             &path,
             r#"{"_tokscale":{"version":1,"accountId":"legacy"},"usageEventsDisplay":[]}"#,
         )?;
+        assert!(!cursor_cache_advertises_owner_envelope(&path));
         assert_eq!(cursor_cache_owner_hash_from_envelope(&path), None);
         assert_eq!(
             cursor_cache_owner_hash_from_file(&path).as_deref(),
