@@ -167,14 +167,21 @@ describe("group member management client flow", () => {
     });
     await screen.findByText("222");
 
-    await act(async () => {
-      firstLeaderboard.resolve(jsonResponse({
+    let staleResponseRead = false;
+    const staleResponse = jsonResponse(null);
+    staleResponse.json = vi.fn(async () => {
+      staleResponseRead = true;
+      return {
         ...initialData,
         period: "month",
         stats: { ...initialData.stats, totalTokens: 111 },
-      }));
+      };
     });
-    await waitFor(() => expect(screen.queryByText("111")).toBeNull());
+    await act(async () => { firstLeaderboard.resolve(staleResponse); });
+    await waitFor(() => expect(staleResponseRead).toBe(true));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.queryByText("111")).toBeNull();
     expect(screen.getByText("222")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Manage @teammate" })).toBeTruthy();
     const inviteRole = screen.getByRole("combobox", { name: "Invite role" });
