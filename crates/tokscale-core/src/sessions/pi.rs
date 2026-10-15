@@ -49,7 +49,10 @@ use std::path::Path;
 /// `message_cache::parser_version()`, while allowing each client to keep its
 /// own client-specific version offset for independent historical invalidations
 /// (e.g. dedup key changes, session metadata).
-pub const PI_FORMAT_PARSER_BASE_VERSION: u32 = 3;
+///
+/// v3 retained assistant `durationMs`; v4 prefers the assistant message's
+/// authoritative request-start `timestamp` over the later persistence time.
+pub const PI_FORMAT_PARSER_BASE_VERSION: u32 = 4;
 
 /// Pi session header (first line of JSONL)
 #[derive(Debug, Deserialize)]
@@ -269,6 +272,7 @@ pub struct PiMessage {
     pub provider: Option<String>,
     #[serde(rename = "responseId")]
     pub response_id: Option<String>,
+    pub timestamp: Option<serde_json::Value>,
     #[serde(rename = "durationMs")]
     pub duration_ms: Option<serde_json::Value>,
 }
@@ -800,10 +804,19 @@ fn parse_pi_format_file_inner(
             .as_ref()
             .and_then(serde_json::Value::as_i64)
             .filter(|duration| *duration > 0);
-        // Pi writes the entry timestamp at message_end; session spans start before it.
-        let timestamp = match (recorded_timestamp, duration_ms) {
-            (Some(end), Some(duration)) => back_anchor_timestamp(end, duration),
-            _ => recorded_timestamp.unwrap_or(fallback_timestamp),
+        let message_start_timestamp = message
+            .timestamp
+            .as_ref()
+            .and_then(serde_json::Value::as_i64)
+            .filter(|timestamp| *timestamp > 0);
+        // Pi's assistant timestamp is the authoritative request start. Older
+        // messages do not carry it, so derive the start from the session entry's
+        // completion timestamp and elapsed duration as a compatibility fallback.
+        let timestamp = match duration_ms {
+            Some(duration) => message_start_timestamp
+                .or_else(|| recorded_timestamp.map(|end| back_anchor_timestamp(end, duration)))
+                .unwrap_or(fallback_timestamp),
+            None => recorded_timestamp.unwrap_or(fallback_timestamp),
         };
 
         let mut unified = UnifiedMessage::new_with_agent(
@@ -909,11 +922,9 @@ mod tests {
     fn assistant_duration_populates_performance_across_pi_format_clients() {
         let file = create_test_file(
             r#"{"type":"session","id":"session-timed","cwd":"/tmp/project"}
-{"type":"message","id":"assistant-1","timestamp":"2026-10-10T06:44:18.431Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","durationMs":2500,"usage":{"input":100,"output":50,"cacheRead":200,"reasoning":20}}}"#,
+{"type":"message","id":"assistant-1","timestamp":"2026-10-10T06:44:18.931Z","message":{"role":"assistant","model":"gpt-5","provider":"openai","timestamp":1791614655931,"durationMs":2500,"usage":{"input":100,"output":50,"cacheRead":200,"reasoning":20}}}"#,
         );
-        let end = chrono::DateTime::parse_from_rfc3339("2026-10-10T06:44:18.431Z")
-            .unwrap()
-            .timestamp_millis();
+        let request_start = 1791614655931;
         for messages in [
             parse_pi_file(file.path()),
             crate::sessions::senpi::parse_senpi_file(file.path()),
@@ -923,7 +934,7 @@ mod tests {
         ] {
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].duration_ms, Some(2500));
-            assert_eq!(messages[0].timestamp, end - 2500);
+            assert_eq!(messages[0].timestamp, request_start);
             assert_eq!(messages[0].tokens.total(), 350);
             assert_eq!(messages[0].tokens.reasoning, 0);
             let entries =
@@ -950,7 +961,7 @@ mod tests {
             let file = create_test_file(&format!(
                 "{{\"type\":\"session\",\"id\":\"session-untimed\"}}\n\
                  {{\"type\":\"message\",\"timestamp\":\"2026-10-10T06:44:18.431Z\",\"message\":\
-                 {{\"role\":\"assistant\",\"model\":\"gpt-5\",\"usage\":{{\"input\":100,\"output\":50}}{field}}}}}"
+                 {{\"role\":\"assistant\",\"model\":\"gpt-5\",\"timestamp\":1791614655931,\"usage\":{{\"input\":100,\"output\":50}}{field}}}}}"
             ));
             let messages = parse_pi_file(file.path());
             assert_eq!(messages.len(), 1, "{field}");
@@ -958,6 +969,44 @@ mod tests {
             assert_eq!(messages[0].tokens.total(), 150, "{field}");
             assert_eq!(messages[0].timestamp, 1791614658431, "{field}");
         }
+    }
+
+    #[test]
+    fn invalid_message_start_falls_back_to_completion_minus_duration() {
+        let completion = chrono::DateTime::parse_from_rfc3339("2026-10-10T06:44:18.431Z")
+            .unwrap()
+            .timestamp_millis();
+        for timestamp in [
+            "null",
+            "0",
+            "-1",
+            r#""1791614655931""#,
+            "true",
+            "{}",
+            "2.5",
+            "9223372036854775808",
+        ] {
+            let file = create_test_file(&format!(
+                "{{\"type\":\"session\",\"id\":\"session-timed\"}}\n                 {{\"type\":\"message\",\"timestamp\":\"2026-10-10T06:44:18.431Z\",\"message\":                 {{\"role\":\"assistant\",\"model\":\"gpt-5\",\"timestamp\":{timestamp},\"durationMs\":2500,\"usage\":{{\"output\":50}}}}}}"
+            ));
+            let messages = parse_pi_file(file.path());
+            assert_eq!(messages.len(), 1, "{timestamp}");
+            assert_eq!(messages[0].timestamp, completion - 2500, "{timestamp}");
+            assert_eq!(messages[0].duration_ms, Some(2500), "{timestamp}");
+        }
+    }
+
+    #[test]
+    fn valid_message_start_does_not_require_a_completion_timestamp() {
+        let file = create_test_file(
+            r#"{"type":"session","id":"session-timed"}
+{"type":"message","message":{"role":"assistant","model":"gpt-5","timestamp":1791614655931,"durationMs":2500,"usage":{"output":50}}}"#,
+        );
+
+        let messages = parse_pi_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1791614655931);
+        assert_eq!(messages[0].duration_ms, Some(2500));
     }
 
     #[test]

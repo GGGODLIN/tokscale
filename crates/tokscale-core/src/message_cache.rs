@@ -4952,7 +4952,7 @@ mod tests {
 
     #[test]
     fn test_lossy_jsonl_parser_versions_invalidate_v3_entries() {
-        assert_eq!(parser_version(ClientId::PrimeAgent), 7);
+        assert_eq!(parser_version(ClientId::PrimeAgent), 8);
         assert_eq!(parser_version(ClientId::Reasonix), 4);
     }
 
@@ -4973,7 +4973,7 @@ mod tests {
             (ClientId::PrimeAgent, 6),
         ] {
             let current = CacheIdentity::for_client(client);
-            assert_eq!(current.parser_version, previous_version + 1, "{client:?}");
+            assert_eq!(current.parser_version, previous_version + 2, "{client:?}");
             let previous = CacheIdentity {
                 namespace: current.namespace,
                 parser_version: previous_version,
@@ -4999,6 +4999,55 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn pi_request_start_parser_versions_reject_completion_anchored_shards() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(
+            b"{\"type\":\"session\",\"id\":\"timed\"}\n{\"type\":\"message\",\"timestamp\":\"2026-10-10T06:44:18.931Z\",\"message\":{\"role\":\"assistant\",\"model\":\"gpt-5\",\"timestamp\":1791614655931,\"durationMs\":2500,\"usage\":{\"output\":50}}}\n",
+        );
+        let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+        for (client, completion_anchored_version) in [
+            (ClientId::Pi, 5),
+            (ClientId::Kimchi, 4),
+            (ClientId::Omp, 4),
+            (ClientId::Senpi, 4),
+            (ClientId::PrimeAgent, 7),
+        ] {
+            let current = CacheIdentity::for_client(client);
+            assert_eq!(
+                current.parser_version,
+                completion_anchored_version + 1,
+                "{client:?}"
+            );
+            let completion_anchored = CacheIdentity {
+                namespace: current.namespace,
+                parser_version: completion_anchored_version,
+            };
+            let shard = cache_shard_path(current, source.path());
+            ensure_cache_dir(shard.parent().unwrap()).unwrap();
+            write_shard_with_limit(
+                &shard,
+                completion_anchored,
+                &[test_entry(
+                    completion_anchored,
+                    source.path(),
+                    "completion-anchored",
+                )],
+                MAX_CACHE_SHARD_BYTES,
+            )
+            .unwrap();
+            assert!(SourceMessageCache::load()
+                .get(current, source.path())
+                .is_none());
+            assert_eq!(
+                SourceFingerprint::from_path(source.path()).unwrap(),
+                fingerprint
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn prime_and_reasonix_v3_shards_are_rejected_before_changed_bytes_are_parsed() {
         for (client, source_bytes, stale_provider, expected_provider, expected_current_version) in [
             (
@@ -5006,7 +5055,7 @@ mod tests {
                 b"{\"type\":\"session\",\"version\":3,\"id\":\"root\",\"cwd\":\"/tmp/project\"}\n{\"type\":\"message\",\"id\":\"valid\",\"message\":{\"role\":\"assistant\",\"provider\":\"anthropic\",\"model\":\"claude-opus-5\",\"usage\":{\"input\":20,\"output\":8}}}\n".as_slice(),
                 "stale-prime-v3",
                 "anthropic",
-                7,
+                8,
             ),
             (
                 ClientId::Reasonix,
