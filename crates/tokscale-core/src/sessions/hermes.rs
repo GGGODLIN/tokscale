@@ -43,6 +43,12 @@ const NULL_PROVIDER_KEY: &str = "<null>";
 /// while current `session_model_usage` rows persist it as an empty string.
 const UNKNOWN_LOG_PROVIDER_KEY: &str = "unknown";
 
+// Parser-owned dedup markers distinguish logged evidence from the start-day
+// residual without mistaking a user-controlled session/model/provider suffix
+// for a split day.
+const LOGGED_DAY_KEY_MARKER: &str = ":__hermes_logged_day_v1__:";
+const RESIDUAL_DAY_KEY_MARKER: &str = ":__hermes_residual_day_v1__:";
+
 /// Marker of a main-loop per-call log line. The usage-unavailable variant
 /// (`in=? out=? usage=unavailable`) carries no figures and is skipped.
 const API_CALL_LOG_MARKER: &str = " agent.conversation_loop: API call #";
@@ -332,6 +338,7 @@ fn load_logged_calls(
 struct DayShare {
     day_key: String,
     timestamp_ms: i64,
+    has_logged_evidence: bool,
     input: i64,
     output: i64,
     cache_read: i64,
@@ -438,6 +445,7 @@ fn allocate_row_by_days(
         let day = shares.entry(day_key.clone()).or_insert(DayShare {
             day_key,
             timestamp_ms: call.timestamp_ms,
+            has_logged_evidence: true,
             input: 0,
             output: 0,
             cache_read: 0,
@@ -481,6 +489,7 @@ fn allocate_row_by_days(
             .or_insert_with(|| DayShare {
                 day_key: start_day_key.clone(),
                 timestamp_ms: start_ms,
+                has_logged_evidence: false,
                 input: 0,
                 output: 0,
                 cache_read: 0,
@@ -554,25 +563,26 @@ fn allocate_row_by_days(
     )
 }
 
-/// Return the calendar day suffix when this message's row was split from log
-/// evidence rather than kept whole on the session's start day.
-///
-/// The caller uses it to pick the best-covered copy of a session that appears
-/// in two databases: a split copy beats a no-logs fallback that would keep the
-/// whole lifetime row on the start day, whatever the database order. The day
-/// suffix is the signal — the fallback path's bare key never carries one.
-pub fn message_day_split_day(message: &UnifiedMessage) -> Option<&str> {
+fn message_split_day_for_marker<'a>(message: &'a UnifiedMessage, marker: &str) -> Option<&'a str> {
     message
         .dedup_key
         .as_deref()
-        .and_then(|key| key.rsplit_once(':'))
+        .and_then(|key| key.rsplit_once(marker))
         .map(|(_, day)| day)
         .filter(|day| day.len() == 10 && chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").is_ok())
 }
 
-/// Whether this message carries a parser-owned logged-day suffix.
+/// Return the day backed by retained log evidence. A residual-only start-day
+/// share is part of the split output but does not increase evidence coverage.
+pub fn message_logged_day(message: &UnifiedMessage) -> Option<&str> {
+    message_split_day_for_marker(message, LOGGED_DAY_KEY_MARKER)
+}
+
+/// Whether this message belongs to a parser-owned split group, including a
+/// residual-only start-day share.
 pub fn message_is_day_split(message: &UnifiedMessage) -> bool {
-    message_day_split_day(message).is_some()
+    message_logged_day(message).is_some()
+        || message_split_day_for_marker(message, RESIDUAL_DAY_KEY_MARKER).is_some()
 }
 
 fn build_message(row: &HermesUsageRow, dedup_key: String) -> UnifiedMessage {
@@ -617,6 +627,14 @@ fn message_from_parts(
     msg
 }
 
+fn escape_hermes_dedup_base_key(key: &str) -> String {
+    key.replace(LOGGED_DAY_KEY_MARKER, ":__hermes_escaped_logged_day_v1__:")
+        .replace(
+            RESIDUAL_DAY_KEY_MARKER,
+            ":__hermes_escaped_residual_day_v1__:",
+        )
+}
+
 /// Emit one usage row: split across its logged days when the evidence allows,
 /// otherwise as a single message on the session's start day. `message_count` is
 /// the session total already resolved to "credit exactly once" by the caller;
@@ -629,6 +647,7 @@ fn push_row_messages(
     bucket_timezone: &BucketTimezone,
     out: &mut Vec<UnifiedMessage>,
 ) {
+    let base_key = escape_hermes_dedup_base_key(&base_key);
     let shares = calls.and_then(|calls| allocate_row_by_days(row, calls, bucket_timezone));
     match shares {
         Some(shares) => {
@@ -639,7 +658,16 @@ fn push_row_messages(
                     // The day is part of the identity: two days of one group
                     // must not share a dedup key, or the caller's dedup pass
                     // drops every day but the first.
-                    format!("{}:{}", base_key, share.day_key),
+                    format!(
+                        "{}{}{}",
+                        base_key,
+                        if share.has_logged_evidence {
+                            LOGGED_DAY_KEY_MARKER
+                        } else {
+                            RESIDUAL_DAY_KEY_MARKER
+                        },
+                        share.day_key
+                    ),
                     share.timestamp_ms,
                     share.tokens(),
                     share.cost,

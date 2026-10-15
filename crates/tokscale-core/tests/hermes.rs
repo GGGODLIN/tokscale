@@ -1521,7 +1521,8 @@ fn test_parse_hermes_sqlite_splits_cross_day_session_by_logged_calls() {
     // part of the dedup key so no day is dropped by the caller's dedup pass.
     for msg in &messages {
         let day_key = local_day_key(msg.timestamp);
-        let expected = format!("hermes:session-cross-day:glm-5.2:zai:{day_key}");
+        let expected =
+            format!("hermes:session-cross-day:glm-5.2:zai:__hermes_logged_day_v1__:{day_key}");
         assert_eq!(msg.dedup_key.as_deref(), Some(expected.as_str()));
     }
     assert_ne!(a.dedup_key, b.dedup_key);
