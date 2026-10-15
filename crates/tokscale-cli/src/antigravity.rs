@@ -3123,10 +3123,6 @@ fn fetch_usage_timestamps(
             "trajectory enrichment budget exhausted or circuit breaker open for connection {}",
             connection.fingerprint
         );
-        eprintln!(
-            "Warning: skipping Antigravity trajectory timestamp enrichment for session {}: {err:#}",
-            summary.session_id
-        );
         return Err(err);
     }
 
