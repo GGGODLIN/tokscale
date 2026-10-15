@@ -890,6 +890,7 @@ fn read_bounded_jsonl_line<R: BufRead>(
     line.clear();
     let mut consumed = 0_u64;
     let mut oversized = false;
+    let mut utf8_tail = Vec::with_capacity(3);
     loop {
         let (take, has_newline) = {
             let available = reader.fill_buf()?;
@@ -910,10 +911,29 @@ fn read_bounded_jsonl_line<R: BufRead>(
                 if line.len().saturating_add(take) > max_bytes {
                     oversized = true;
                 } else {
-                    let chunk = std::str::from_utf8(&available[..take]).map_err(|error| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-                    })?;
-                    line.push_str(chunk);
+                    let mut utf8 = Vec::with_capacity(utf8_tail.len() + take);
+                    utf8.extend_from_slice(&utf8_tail);
+                    utf8.extend_from_slice(&available[..take]);
+                    match std::str::from_utf8(&utf8) {
+                        Ok(chunk) => {
+                            line.push_str(chunk);
+                            utf8_tail.clear();
+                        }
+                        Err(error) if error.error_len().is_none() => {
+                            let valid_up_to = error.valid_up_to();
+                            // A BufRead boundary may bisect a valid multi-byte character.
+                            let chunk = std::str::from_utf8(&utf8[..valid_up_to]).unwrap();
+                            line.push_str(chunk);
+                            utf8_tail.clear();
+                            utf8_tail.extend_from_slice(&utf8[valid_up_to..]);
+                        }
+                        Err(error) => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                error,
+                            ));
+                        }
+                    }
                 }
             }
             (take, take < available.len() || available[take - 1] == b'\n')
@@ -921,6 +941,12 @@ fn read_bounded_jsonl_line<R: BufRead>(
         reader.consume(take);
         consumed += take as u64;
         if has_newline {
+            if !oversized && !utf8_tail.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "incomplete UTF-8 at end of JSONL record",
+                ));
+            }
             return Ok(if oversized {
                 BoundedJsonlRead::Oversized(consumed)
             } else {
