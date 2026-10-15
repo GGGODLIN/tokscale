@@ -7,10 +7,8 @@ import { profileUrl } from '@/lib/seo/urls';
 import { getSession } from '@/lib/auth/session';
 import { getModerationNotice } from '@/lib/moderation/notice';
 import ProfilePageClient, { type ProfileData } from './ProfilePageClient';
+import { PROFILE_PERIODS, type ProfilePeriod } from '@/lib/reportingPeriods';
 import { TOKSCALE_X_HANDLE } from '@/lib/community';
-
-const PROFILE_PERIODS = ["all", "week", "month"] as const;
-type ProfilePeriod = (typeof PROFILE_PERIODS)[number];
 
 function parseProfilePeriod(value: string | string[] | undefined): ProfilePeriod {
   const period = Array.isArray(value) ? value[0] : value;

@@ -326,31 +326,45 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         }
     };
 
-    let spans = if is_very_narrow {
-        fitting_compact_spans()
-    } else {
+    let labeled_spans = |dense: bool| {
         let lang = app.settings.tui_language;
-        let mut spans = vec![
-            Span::styled(
-                format!("{} {} ", tr(lang, MessageKey::HelpScroll), SEPARATOR),
-                Style::default().fg(app.theme.muted),
-            ),
-            Span::styled(
-                tr(lang, MessageKey::HelpSort),
-                Style::default().fg(Color::Blue),
-            ),
-            Span::styled(SPACED_SEPARATOR, Style::default().fg(app.theme.muted)),
-        ];
+        let separator = if dense { SEPARATOR } else { SPACED_SEPARATOR };
+        let inline_gap = if dense { SEPARATOR } else { " " };
+        let mut spans = if dense {
+            vec![
+                Span::styled(VERTICAL_NAV, Style::default().fg(app.theme.muted)),
+                Span::styled(separator, Style::default().fg(app.theme.muted)),
+                Span::styled(HORIZONTAL_NAV, Style::default().fg(app.theme.muted)),
+                Span::styled(separator, Style::default().fg(app.theme.muted)),
+                Span::styled(
+                    tr(lang, MessageKey::HelpSort),
+                    Style::default().fg(Color::Blue),
+                ),
+                Span::styled(separator, Style::default().fg(app.theme.muted)),
+            ]
+        } else {
+            vec![
+                Span::styled(
+                    format!("{} {} ", tr(lang, MessageKey::HelpScroll), SEPARATOR),
+                    Style::default().fg(app.theme.muted),
+                ),
+                Span::styled(
+                    tr(lang, MessageKey::HelpSort),
+                    Style::default().fg(Color::Blue),
+                ),
+                Span::styled(separator, Style::default().fg(app.theme.muted)),
+            ]
+        };
         if app.current_tab == Tab::Daily {
             if app.is_daily_detail_active() {
                 spans.push(Span::styled(tr(lang, MessageKey::HelpBack), hint_style));
             } else {
                 spans.push(Span::styled(tr(lang, MessageKey::HelpDetails), hint_style));
-                spans.push(Span::styled(" ", Style::default()));
+                spans.push(Span::styled(inline_gap, Style::default()));
                 spans.push(Span::styled(tr(lang, MessageKey::HelpToday), hint_style));
             }
             spans.push(Span::styled(
-                SPACED_SEPARATOR,
+                separator,
                 Style::default().fg(app.theme.muted),
             ));
         }
@@ -361,7 +375,7 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(tr(lang, MessageKey::HelpDetails), hint_style));
             }
             spans.push(Span::styled(
-                SPACED_SEPARATOR,
+                separator,
                 Style::default().fg(app.theme.muted),
             ));
         }
@@ -372,14 +386,14 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 spans.push(Span::styled(tr(lang, MessageKey::HelpDetails), hint_style));
             }
             spans.push(Span::styled(
-                SPACED_SEPARATOR,
+                separator,
                 Style::default().fg(app.theme.muted),
             ));
         }
         if app.current_tab == Tab::Hourly {
             spans.push(Span::styled(tr(lang, MessageKey::HelpProfile), hint_style));
             spans.push(Span::styled(
-                SPACED_SEPARATOR,
+                separator,
                 Style::default().fg(app.theme.muted),
             ));
         }
@@ -388,7 +402,7 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 tr(lang, MessageKey::HelpSessionDetails),
                 hint_style,
             ));
-            spans.push(Span::styled(" ", Style::default()));
+            spans.push(Span::styled(inline_gap, Style::default()));
             spans.push(Span::styled(
                 if app.roll_up_subagents {
                     tr(lang, MessageKey::HelpRollupOn)
@@ -398,24 +412,24 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 count_style,
             ));
             spans.push(Span::styled(
-                SPACED_SEPARATOR,
+                separator,
                 Style::default().fg(app.theme.muted),
             ));
         }
         spans.push(Span::styled(tr(lang, MessageKey::HelpSources), count_style));
-        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(inline_gap, Style::default()));
         spans.push(Span::styled(
             tr(lang, MessageKey::HelpLanguage),
             count_style,
         ));
-        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(inline_gap, Style::default()));
         spans.push(Span::styled(
             format!("[g:{}]", app.group_by.borrow()),
             count_style,
         ));
         // `w` only does anything under workspace grouping, so only advertise it there.
         if *app.group_by.borrow() == tokscale_core::GroupBy::WorkspaceModel {
-            spans.push(Span::styled(" ", Style::default()));
+            spans.push(Span::styled(inline_gap, Style::default()));
             spans.push(Span::styled(
                 match app.worktree_rollup {
                     tokscale_core::WorktreeRollup::MergeIntoRepo => "[w:repos]",
@@ -425,14 +439,14 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             ));
         }
         spans.push(Span::styled(
-            SPACED_SEPARATOR,
+            separator,
             Style::default().fg(app.theme.muted),
         ));
         spans.push(Span::styled(
             format!("[p:{}]", app.theme.name.as_str()),
             Style::default().fg(Color::Magenta),
         ));
-        spans.push(Span::styled(" ", Style::default()));
+        spans.push(Span::styled(inline_gap, Style::default()));
         spans.push(Span::styled(
             if app.auto_refresh {
                 format!("[R:auto {}s]", app.auto_refresh_interval.as_secs())
@@ -446,22 +460,34 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
             }),
         ));
         spans.push(Span::styled(
-            SPACED_SEPARATOR,
+            separator,
             Style::default().fg(app.theme.muted),
         ));
         spans.push(Span::styled(tr(lang, MessageKey::HelpRefresh), hint_style));
         spans.push(Span::styled(
-            format!("{}e{}", SPACED_SEPARATOR, SPACED_SEPARATOR),
+            format!("{}e{}", separator, separator),
             Style::default().fg(app.theme.muted),
         ));
         spans.push(Span::styled(
             tr(lang, MessageKey::HelpQuit),
             Style::default().fg(app.theme.muted),
         ));
-        if spans.iter().map(Span::width).sum::<usize>() <= usize::from(area.width) {
-            spans
+        spans
+    };
+
+    let spans = if is_very_narrow {
+        fitting_compact_spans()
+    } else {
+        let full_spans = labeled_spans(false);
+        if full_spans.iter().map(Span::width).sum::<usize>() <= usize::from(area.width) {
+            full_spans
         } else {
-            fitting_compact_spans()
+            let dense_spans = labeled_spans(true);
+            if dense_spans.iter().map(Span::width).sum::<usize>() <= usize::from(area.width) {
+                dense_spans
+            } else {
+                fitting_compact_spans()
+            }
         }
     };
 
@@ -667,15 +693,38 @@ mod tests {
         for terminal_width in 60..=200 {
             let actual = rendered_help_text(app, terminal_width, terminal_width);
             let available_width = usize::from(terminal_width - 2);
-            let expected = if full_width <= available_width {
-                &full
-            } else {
-                &compact
-            };
-            assert_eq!(
-                actual, *expected,
-                "{context}, terminal_width={terminal_width}, full_width={full_width}"
+            let actual_width = unicode_width::UnicodeWidthStr::width(actual.as_str());
+            assert!(
+                actual_width <= available_width,
+                "{context}, terminal_width={terminal_width}: {actual}"
             );
+            if full_width <= available_width {
+                assert_eq!(
+                    actual, full,
+                    "{context}, terminal_width={terminal_width}, full_width={full_width}"
+                );
+            } else if actual != compact {
+                assert!(
+                    actual.contains(tr(app.settings.tui_language, MessageKey::HelpSort)),
+                    "{context}, terminal_width={terminal_width}: {actual}"
+                );
+                assert!(
+                    actual.contains(tr(app.settings.tui_language, MessageKey::HelpSources)),
+                    "{context}, terminal_width={terminal_width}: {actual}"
+                );
+                assert!(
+                    actual.contains(tr(app.settings.tui_language, MessageKey::HelpLanguage)),
+                    "{context}, terminal_width={terminal_width}: {actual}"
+                );
+                assert!(
+                    actual.contains("[g:") && actual.contains("[p:") && actual.contains("[R:"),
+                    "{context}, terminal_width={terminal_width}: {actual}"
+                );
+                assert!(
+                    actual.ends_with(quit_hint),
+                    "{context}, terminal_width={terminal_width}: {actual}"
+                );
+            }
         }
     }
 
@@ -757,6 +806,37 @@ mod tests {
                 &format!("auto_refresh={auto_refresh}, refresh_secs={refresh_secs}"),
             );
         }
+    }
+
+    #[test]
+    fn help_row_uses_labeled_compaction_before_keys_only() {
+        use std::time::Duration;
+
+        use tokscale_core::GroupBy;
+
+        use crate::tui::themes::{Theme, ThemeName};
+
+        let mut app = make_app_on(Tab::Overview);
+        app.theme = Theme::from_name_for_current_terminal(ThemeName::GruvboxMaterial);
+        app.auto_refresh = true;
+        app.auto_refresh_interval = Duration::from_secs(300);
+        *app.group_by.borrow_mut() = GroupBy::ClientProviderModel;
+
+        let full = rendered_help_text(&mut app, 1026, 1026);
+        let compact = rendered_help_text(&mut app, 59, 1026);
+        let labeled = (60..=200)
+            .map(|width| rendered_help_text(&mut app, width, width))
+            .find(|text| text != &full && text != &compact)
+            .expect("a labeled compact width should exist between full and keys-only modes");
+
+        assert!(labeled.contains(tr(TuiLanguage::En, MessageKey::HelpSort)));
+        assert!(labeled.contains(tr(TuiLanguage::En, MessageKey::HelpSources)));
+        assert!(labeled.contains(tr(TuiLanguage::En, MessageKey::HelpLanguage)));
+        assert!(labeled.contains(&format!("[g:{}]", app.group_by.borrow())));
+        assert!(labeled.contains(&format!("[p:{}]", app.theme.name.as_str())));
+        assert!(labeled.contains("[R:auto 300s]"));
+        assert!(labeled.contains(tr(TuiLanguage::En, MessageKey::HelpRefresh)));
+        assert!(labeled.ends_with(tr(TuiLanguage::En, MessageKey::HelpQuit)));
     }
 
     #[test]

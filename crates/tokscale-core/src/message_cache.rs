@@ -54,6 +54,13 @@ const CACHE_FORMAT_VERSION: u32 = 10;
 // version moves too because those entries also serialize UnifiedMessage, so
 // it stays one ahead of CACHE_FORMAT_VERSION as both move together.
 const MICODE_CACHE_FORMAT_VERSION: u32 = 11;
+// Claude stores the point a grown transcript resumes from beside each cached
+// entry, in its own envelope for the same reason MiMo does: a new field on
+// CachedSourceEntry would need a CACHE_FORMAT_VERSION bump, and Claude entries
+// hold retained history a reparse cannot rebuild. A Claude shard written at
+// CACHE_FORMAT_VERSION still loads, without checkpoints. It stays above
+// MICODE_CACHE_FORMAT_VERSION and moves with it.
+const CLAUDE_CACHE_FORMAT_VERSION: u32 = 12;
 const LEGACY_CACHE_FORMAT_VERSION_V4: u32 = 4;
 const LEGACY_CACHE_FORMAT_VERSION_V5: u32 = 5;
 const LEGACY_CACHE_FORMAT_VERSION_V6: u32 = 6;
@@ -1592,7 +1599,11 @@ fn parser_version(client: ClientId) -> u32 {
         // v6->v7: attempt sequence numbers restart in each transcript, so
         // fallback attempt keys now include the session id to avoid merging
         // unrelated sessions in the shared parse lane.
-        ClientId::Dsh => 7,
+        // v7->v8: a settlement now measures its own call against the
+        // `step/start` clock of its `(turn, step)` and carries `duration_ms`.
+        // Transcripts are append-only, so every cached row predates that field
+        // and would keep the client reporting zero throughput until reparsed.
+        ClientId::Dsh => 8,
         // First version of the fx (vercel-labs) usage-v2.json parser. Entries
         // are versioned from the start so later parser changes have an
         // obvious local counter to bump, like every other client here.
@@ -1766,6 +1777,12 @@ pub(crate) struct CachedSourceEntry {
     /// field: the namespace-specific envelope serializes it beside that entry.
     #[serde(skip)]
     pub micode_metadata: Option<Vec<crate::sessions::micode::MiMoRowMetadata>>,
+    /// Claude-only point a later scan of a grown transcript continues from.
+    /// Like MiMo's provenance it is serialized beside the entry in a Claude
+    /// envelope, so the positional layout of Claude entries, which hold
+    /// retained history, does not change.
+    #[serde(skip)]
+    pub claude_checkpoint: Option<crate::sessions::claudecode::ClaudeCheckpoint>,
 }
 
 /// TokenBreakdown wire layout used by cache formats 4 through 8, before
@@ -2129,6 +2146,7 @@ impl From<LegacyCachedSourceEntryV7> for CachedSourceEntry {
             prime_accounting: entry.prime_accounting,
             opencode_incremental: entry.opencode_incremental,
             micode_metadata: None,
+            claude_checkpoint: None,
         }
     }
 }
@@ -2162,6 +2180,7 @@ impl From<LegacyCachedSourceEntryV8> for CachedSourceEntry {
             prime_accounting: entry.prime_accounting,
             opencode_incremental: entry.opencode_incremental,
             micode_metadata: None,
+            claude_checkpoint: None,
         }
     }
 }
@@ -2195,6 +2214,7 @@ impl From<LegacyCachedSourceEntryV9> for CachedSourceEntry {
             prime_accounting: entry.prime_accounting,
             opencode_incremental: entry.opencode_incremental,
             micode_metadata: None,
+            claude_checkpoint: None,
         }
     }
 }
@@ -2227,6 +2247,7 @@ impl From<LegacyCachedSourceEntryV4> for CachedSourceEntry {
             prime_accounting: None,
             opencode_incremental: None,
             micode_metadata: None,
+            claude_checkpoint: None,
         }
     }
 }
@@ -2259,6 +2280,7 @@ impl From<LegacyCachedSourceEntryV5> for CachedSourceEntry {
             prime_accounting: entry.prime_accounting,
             opencode_incremental: None,
             micode_metadata: None,
+            claude_checkpoint: None,
         }
     }
 }
@@ -2308,6 +2330,7 @@ impl From<LegacyCachedSourceEntryV6> for CachedSourceEntry {
             prime_accounting: entry.prime_accounting,
             opencode_incremental: None,
             micode_metadata: None,
+            claude_checkpoint: None,
         }
     }
 }
@@ -2332,6 +2355,7 @@ impl CachedSourceEntry {
             prime_accounting: None,
             opencode_incremental: None,
             micode_metadata: None,
+            claude_checkpoint: None,
         }
     }
 
@@ -2340,6 +2364,17 @@ impl CachedSourceEntry {
         metadata: Vec<crate::sessions::micode::MiMoRowMetadata>,
     ) -> Self {
         self.micode_metadata = Some(metadata);
+        self
+    }
+
+    /// Attach the point a later Claude scan resumes from. It describes the
+    /// first `message_count` messages of this entry, which are the live parse;
+    /// retained history follows them.
+    pub(crate) fn with_claude_checkpoint(
+        mut self,
+        checkpoint: Option<crate::sessions::claudecode::ClaudeCheckpoint>,
+    ) -> Self {
+        self.claude_checkpoint = checkpoint;
         self
     }
 
@@ -2396,6 +2431,7 @@ impl CachedSourceEntry {
             prime_accounting: self.prime_accounting.take(),
             opencode_incremental: self.opencode_incremental.take(),
             micode_metadata: self.micode_metadata.take(),
+            claude_checkpoint: self.claude_checkpoint.take(),
         }
     }
 
@@ -3335,6 +3371,32 @@ fn read_shard_with_limit(
         };
     }
 
+    if envelope.format_version == CLAUDE_CACHE_FORMAT_VERSION {
+        if identity.namespace != ClientId::Claude.as_str() {
+            return ShardReadStatus::Stale;
+        }
+        type ClaudeWireEntry = (
+            CachedSourceEntry,
+            Option<crate::sessions::claudecode::ClaudeCheckpoint>,
+        );
+        return match bincode::options()
+            .with_limit(max_shard_bytes)
+            .deserialize::<Vec<ClaudeWireEntry>>(&envelope.payload)
+        {
+            Ok(entries) => ShardReadStatus::Loaded(
+                entries
+                    .into_iter()
+                    .map(|(entry, checkpoint)| {
+                        let checkpoint =
+                            checkpoint.filter(|checkpoint| checkpoint.has_valid_integrity());
+                        entry.with_claude_checkpoint(checkpoint)
+                    })
+                    .collect(),
+            ),
+            Err(error) => ShardReadStatus::Invalid(error.to_string()),
+        };
+    }
+
     if envelope.format_version == LEGACY_MICODE_CACHE_FORMAT_VERSION_V10
         && identity.namespace == ClientId::MiMoCode.as_str()
     {
@@ -3499,10 +3561,19 @@ fn write_shard_with_limit(
     max_shard_bytes: u64,
 ) -> std::io::Result<()> {
     let is_micode = identity.namespace == ClientId::MiMoCode.as_str();
+    let is_claude = identity.namespace == ClientId::Claude.as_str();
     let payload = if is_micode {
         let entries: Vec<_> = entries
             .iter()
             .map(|entry| (entry, &entry.micode_metadata))
+            .collect();
+        bincode::options()
+            .with_limit(max_shard_bytes)
+            .serialize(&entries)
+    } else if is_claude {
+        let entries: Vec<_> = entries
+            .iter()
+            .map(|entry| (entry, &entry.claude_checkpoint))
             .collect();
         bincode::options()
             .with_limit(max_shard_bytes)
@@ -3516,6 +3587,8 @@ fn write_shard_with_limit(
     let envelope = CachedShardEnvelope {
         format_version: if is_micode {
             MICODE_CACHE_FORMAT_VERSION
+        } else if is_claude {
+            CLAUDE_CACHE_FORMAT_VERSION
         } else {
             CACHE_FORMAT_VERSION
         },
@@ -5695,8 +5768,9 @@ mod tests {
     #[test]
     fn test_dsh_attempt_identity_parser_version_invalidates_v6_entries() {
         // DSH transcript files are append-only, so v6 cache entries keep the
-        // old cross-session attempt keys unless the source is reparsed.
-        assert_eq!(parser_version(ClientId::Dsh), 7);
+        // old cross-session attempt keys unless the source is reparsed. The
+        // v7->v8 bump retires rows parsed without generation durations.
+        assert_eq!(parser_version(ClientId::Dsh), 8);
     }
 
     /// Names the row that only a served cache can put in a report. No DSH
@@ -5952,6 +6026,83 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn dsh_v7_shards_are_reparsed_with_generation_duration() {
+        let temp_home = TempDir::new().unwrap();
+        let _cache_env = sandbox_cache_env(temp_home.path());
+        let source_home = TempDir::new().unwrap();
+        let source = write_dsh_transcript(
+            source_home.path(),
+            "session-duration",
+            br#"{"type":"session","id":"session-duration","createdAt":1,"cwd":"/work"}
+{"type":"step/start","seq":1,"time":1786669450000,"data":{"turn":1,"step":1}}
+{"type":"assistant/message","seq":2,"time":1786669451200,"data":{"turn":1,"step":1,"message":{"source":{"provider":"irix","model":"deepseek-v4-flash"}},"usage":{"inputTokens":130,"outputTokens":159}}}
+"#,
+        );
+        let current_identity = CacheIdentity::for_client(ClientId::Dsh);
+        assert_eq!(current_identity.parser_version, 8);
+        let stale_identity = CacheIdentity {
+            namespace: current_identity.namespace,
+            parser_version: 7,
+        };
+        let fingerprint = SourceFingerprint::from_path(&source).unwrap();
+        let stale_entry = CachedSourceEntry::new(
+            stale_identity,
+            &source,
+            fingerprint.clone(),
+            vec![UnifiedMessage::new(
+                current_identity.namespace,
+                "deepseek-v4-flash",
+                "irix",
+                "session-duration",
+                1786669451200,
+                crate::TokenBreakdown {
+                    input: 130,
+                    output: 159,
+                    cache_read: 0,
+                    cache_write: 0,
+                    cache_write_1h: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            )],
+            Vec::new(),
+            None,
+        );
+        let stale_path = cache_shard_path(current_identity, &source);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        write_shard_with_limit(
+            &stale_path,
+            stale_identity,
+            &[stale_entry],
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let scanned = scan_dsh(source_home.path());
+        assert_eq!(scanned.len(), 1);
+        assert_eq!(scanned[0].timestamp, 1786669450000);
+        assert_eq!(scanned[0].duration_ms, Some(1_200));
+        assert_eq!(
+            SourceFingerprint::from_path(&source).unwrap(),
+            fingerprint,
+            "parser-version invalidation must not require a source rewrite"
+        );
+
+        let persisted = SourceMessageCache::load();
+        let cached = persisted
+            .get(current_identity, &source)
+            .expect("the scan must persist the entry it reparsed");
+        assert_eq!(cached.parser_version, 8);
+        assert_eq!(cached.messages.len(), 1);
+        assert_eq!(cached.messages[0].timestamp, 1786669450000);
+        assert_eq!(cached.messages[0].duration_ms, Some(1_200));
+
+        let warm = scan_dsh(source_home.path());
+        assert_eq!(warm, scanned, "the warm scan must retain the rebuilt span");
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn dsh_v3_shards_are_reparsed_with_the_concrete_served_model() {
         let temp_home = TempDir::new().unwrap();
         let _cache_env = sandbox_cache_env(temp_home.path());
@@ -5964,7 +6115,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 7);
+        assert_eq!(current_identity.parser_version, 8);
         // Pinned at 3, the identity 4.14.0 cached under, rather than derived
         // from the running version: this is the row that release left on disk.
         let stale_identity = CacheIdentity {
@@ -6025,7 +6176,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 7);
+        assert_eq!(cached.parser_version, 8);
         assert_eq!(cached.messages.len(), 1);
         assert_eq!(cached.messages[0].model_id, "glm-5.3");
 
@@ -6052,7 +6203,7 @@ mod tests {
 "#,
         );
         let current_identity = CacheIdentity::for_client(ClientId::Dsh);
-        assert_eq!(current_identity.parser_version, 7);
+        assert_eq!(current_identity.parser_version, 8);
         // Pinned at 4, the identity 4.15.0 cached under; see the v3 test.
         let stale_identity = CacheIdentity {
             namespace: current_identity.namespace,
@@ -6112,7 +6263,7 @@ mod tests {
         let cached = persisted
             .get(current_identity, &source)
             .expect("the scan must persist the entry it reparsed");
-        assert_eq!(cached.parser_version, 7);
+        assert_eq!(cached.parser_version, 8);
         assert_eq!(cached.messages, scanned);
 
         let warm = scan_dsh(source_home.path());
@@ -7576,6 +7727,105 @@ mod tests {
         }
     }
 
+    fn claude_checkpointed_entry(dir: &TempDir) -> CachedSourceEntry {
+        let source = dir.path().join("session.jsonl");
+        std::fs::write(
+            &source,
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01.000Z","requestId":"req_a","message":{"id":"msg_a","model":"claude-sonnet-4-5","usage":{"input_tokens":3,"output_tokens":1}}}
+"#,
+        )
+        .unwrap();
+        let parsed = crate::sessions::claudecode::parse_claude_file_with_checkpoint(&source, None);
+        assert!(parsed.checkpoint.is_some());
+        CachedSourceEntry::new_with_retained_message_keys(
+            CacheIdentity::for_client(ClientId::Claude),
+            &source,
+            SourceFingerprint::from_path(&source).unwrap(),
+            parsed.messages,
+            &HashSet::new(),
+        )
+        .with_claude_checkpoint(parsed.checkpoint)
+    }
+
+    #[test]
+    fn test_claude_envelope_round_trips_the_checkpoint() {
+        let dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let entry = claude_checkpointed_entry(&dir);
+        let shard = dir.path().join("shard.bin");
+        write_shard_with_limit(
+            &shard,
+            identity,
+            std::slice::from_ref(&entry),
+            MAX_CACHE_SHARD_BYTES,
+        )
+        .unwrap();
+
+        let envelope: CachedShardEnvelope = bincode::options()
+            .deserialize_from(BufReader::new(File::open(&shard).unwrap()))
+            .unwrap();
+        assert_eq!(envelope.format_version, CLAUDE_CACHE_FORMAT_VERSION);
+        let ShardReadStatus::Loaded(entries) = read_shard(&shard, identity) else {
+            panic!("a Claude envelope loads");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].claude_checkpoint, entry.claude_checkpoint);
+        assert_eq!(entries[0].messages, entry.messages);
+        assert!(!entries[0].needs_retention_provenance_migration());
+
+        // A valid bincode mutation of parser state must discard only the
+        // checkpoint. The cached messages remain available and a changed file
+        // will take the ordinary full-parse path.
+        let mut corrupted = entry.clone();
+        corrupted
+            .claude_checkpoint
+            .as_mut()
+            .unwrap()
+            .corrupt_state_for_test();
+        write_shard_with_limit(&shard, identity, &[corrupted], MAX_CACHE_SHARD_BYTES).unwrap();
+        let ShardReadStatus::Loaded(entries) = read_shard(&shard, identity) else {
+            panic!("a shard with a corrupted checkpoint still loads its messages");
+        };
+        assert!(entries[0].claude_checkpoint.is_none());
+        assert_eq!(entries[0].messages, entry.messages);
+
+        // Only Claude reads it.
+        let other = CacheIdentity::for_client(ClientId::Codex);
+        let mut foreign = envelope;
+        foreign.parser_namespace = other.namespace.to_string();
+        foreign.parser_version = other.parser_version;
+        std::fs::write(&shard, bincode::options().serialize(&foreign).unwrap()).unwrap();
+        assert!(matches!(read_shard(&shard, other), ShardReadStatus::Stale));
+    }
+
+    #[test]
+    fn test_claude_shard_at_the_shared_format_still_loads_without_a_checkpoint() {
+        let dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let entry = claude_checkpointed_entry(&dir);
+        // The layout every Claude shard had before the envelope: the entries
+        // alone, at CACHE_FORMAT_VERSION.
+        let envelope = CachedShardEnvelope {
+            format_version: CACHE_FORMAT_VERSION,
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
+            payload: bincode::options().serialize(&vec![&entry]).unwrap(),
+        };
+        let shard = dir.path().join("shard.bin");
+        std::fs::write(&shard, bincode::options().serialize(&envelope).unwrap()).unwrap();
+
+        let ShardReadStatus::Loaded(entries) = read_shard(&shard, identity) else {
+            panic!("a format-{CACHE_FORMAT_VERSION} Claude shard still loads");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].messages, entry.messages);
+        assert_eq!(
+            entries[0].fallback_timestamp_indices, entry.fallback_timestamp_indices,
+            "retention provenance survives"
+        );
+        assert!(entries[0].claude_checkpoint.is_none());
+    }
+
     #[test]
     fn test_micode_metadata_keeps_exact_current_entry_bytes() {
         let source = write_temp_file(b"{}\n");
@@ -7762,7 +8012,7 @@ mod tests {
         let mut envelope: CachedShardEnvelope = bincode::options()
             .deserialize_from(BufReader::new(File::open(&path).unwrap()))
             .unwrap();
-        assert_eq!(envelope.format_version, CACHE_FORMAT_VERSION);
+        assert_eq!(envelope.format_version, CLAUDE_CACHE_FORMAT_VERSION);
         envelope.format_version = MICODE_CACHE_FORMAT_VERSION;
         std::fs::write(&path, bincode::options().serialize(&envelope).unwrap()).unwrap();
         assert!(matches!(

@@ -49,6 +49,12 @@ use std::time::Instant;
 static RETENTION_PROVENANCE_REBUILDS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Records every Claude transcript a scan continued from its checkpoint
+/// instead of parsing from byte 0. Paths are unique per test, so a test can
+/// assert on its own transcript while others run alongside it.
+#[cfg(test)]
+static CLAUDE_RESUMED_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
 /// Strip a CLIProxyAPI-style `(level)` reasoning-effort suffix from a model id.
 ///
 /// Mirrors <https://help.router-for.me/configuration/thinking>: the proxy
@@ -1454,6 +1460,65 @@ fn parse_all_messages_streaming<S: MessageSink>(
             Option<&message_cache::SourceFingerprint>,
         ) -> Option<message_cache::FingerprintStatus>,
     {
+        load_or_parse_resumable_source(
+            identity,
+            path,
+            source_cache,
+            pricing,
+            history,
+            fingerprint_from_path,
+            |path, fingerprint| {
+                let (messages, cacheable) = parse(path, fingerprint);
+                SourceParse {
+                    messages,
+                    cacheable,
+                    claude_checkpoint: None,
+                }
+            },
+            None,
+        )
+    }
+
+    /// One parse of a source file, and the Claude checkpoint it ended in, if
+    /// any (see [`sessions::claudecode::ClaudeCheckpoint`]).
+    struct SourceParse {
+        messages: Vec<UnifiedMessage>,
+        cacheable: bool,
+        claude_checkpoint: Option<sessions::claudecode::ClaudeCheckpoint>,
+    }
+
+    /// Continues a changed file's parse from the entry cached for it, or
+    /// returns `None` to have the whole file parsed instead.
+    type ResumeSource<'a> = &'a dyn Fn(
+        &Path,
+        &message_cache::CachedSourceEntry,
+        &message_cache::SourceFingerprint,
+    ) -> Option<SourceParse>;
+
+    /// The loader behind every `load_or_parse_source*` variant.
+    ///
+    /// `resume` is only tried when the fingerprint changed under a cached
+    /// entry, and before the full parse. Whatever it returns goes through the
+    /// same retention merge and entry rebuild as a full parse, so it has to
+    /// produce exactly the messages a full parse of the file would.
+    #[allow(clippy::too_many_arguments)]
+    fn load_or_parse_resumable_source<F, FingerprintFn>(
+        identity: message_cache::CacheIdentity,
+        path: &Path,
+        source_cache: &message_cache::SourceMessageCache,
+        pricing: Option<&pricing::PricingService>,
+        history: HistoryRetention,
+        fingerprint_from_path: FingerprintFn,
+        parse: F,
+        resume: Option<ResumeSource<'_>>,
+    ) -> CachedParseOutcome
+    where
+        F: Fn(&Path, Option<&message_cache::SourceFingerprint>) -> SourceParse,
+        FingerprintFn: Fn(
+            &Path,
+            Option<&message_cache::SourceFingerprint>,
+        ) -> Option<message_cache::FingerprintStatus>,
+    {
         let mut cached = source_cache.take(identity, path);
         // An entry written before retention provenance existed cannot say
         // which of its rows the live transcript already dropped, so serving it
@@ -1474,7 +1539,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         let Some(fingerprint_status) =
             fingerprint_from_path(path, cached.as_ref().map(|entry| &entry.fingerprint))
         else {
-            let (mut messages, _) = parse(path, None);
+            let mut messages = parse(path, None).messages;
             apply_pricing_to_messages(&mut messages, pricing);
             return CachedParseOutcome {
                 messages,
@@ -1521,7 +1586,19 @@ fn parse_all_messages_streaming<S: MessageSink>(
             cached = Some(entry);
         }
 
-        let (mut messages, cacheable) = parse(path, Some(&fingerprint));
+        // An entry that needs its retention provenance rebuilt has to take the
+        // full parse, which is what re-derives it.
+        let resumed = match (resume, cached.as_ref()) {
+            (Some(resume), Some(entry)) if !rebuild_retention_provenance => {
+                resume(path, entry, &fingerprint)
+            }
+            _ => None,
+        };
+        let SourceParse {
+            mut messages,
+            cacheable,
+            claude_checkpoint,
+        } = resumed.unwrap_or_else(|| parse(path, Some(&fingerprint)));
         // Reaching here means the file changed under a cache entry we still
         // hold. For a source that rewrites transcripts in place that is not
         // only "new content appeared" — it can also be "already-published
@@ -1567,6 +1644,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 }
             })
         };
+        // The checkpoint describes the live messages, which come first in the
+        // entry; retained history follows them.
+        let cache_entry = cache_entry.map(|entry| entry.with_claude_checkpoint(claude_checkpoint));
         apply_pricing_to_messages(&mut messages, pricing);
 
         CachedParseOutcome {
@@ -1614,6 +1694,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     /// count, and neither do some keys inside an otherwise-qualifying lane —
     /// hence `key_is_globally_stable` rather than a blanket per-client
     /// promise.
+    #[allow(clippy::too_many_arguments)]
     fn load_or_parse_source_with_fingerprint_retaining_history<F, FingerprintFn>(
         identity: message_cache::CacheIdentity,
         path: &Path,
@@ -1622,15 +1703,16 @@ fn parse_all_messages_streaming<S: MessageSink>(
         key_is_globally_stable: fn(&str) -> bool,
         fingerprint_from_path: FingerprintFn,
         parse: F,
+        resume: Option<ResumeSource<'_>>,
     ) -> CachedParseOutcome
     where
-        F: Fn(&Path) -> Vec<UnifiedMessage>,
+        F: Fn(&Path) -> SourceParse,
         FingerprintFn: Fn(
             &Path,
             Option<&message_cache::SourceFingerprint>,
         ) -> Option<message_cache::FingerprintStatus>,
     {
-        load_or_parse_source_with_fingerprint_and_policy(
+        load_or_parse_resumable_source(
             identity,
             path,
             source_cache,
@@ -1639,8 +1721,41 @@ fn parse_all_messages_streaming<S: MessageSink>(
                 key_is_globally_stable,
             },
             fingerprint_from_path,
-            |path, _| (parse(path), true),
+            |path, _| parse(path),
+            resume,
         )
+    }
+
+    /// Continue a Claude Code transcript that only grew since its entry was
+    /// cached. A changed sidecar (the subagent meta file, a parent session, a
+    /// cc-mirror variant) can change messages before the checkpoint, so it
+    /// takes the full parse.
+    fn resume_claude_source(
+        path: &Path,
+        entry: &message_cache::CachedSourceEntry,
+        fingerprint: &message_cache::SourceFingerprint,
+        claude_home: &Path,
+    ) -> Option<SourceParse> {
+        let checkpoint = entry.claude_checkpoint.as_ref()?;
+        if entry.fingerprint.related_files != fingerprint.related_files {
+            return None;
+        }
+        let parsed = sessions::claudecode::resume_claude_file(
+            path,
+            Some(claude_home),
+            checkpoint,
+            &entry.messages,
+        )?;
+        #[cfg(test)]
+        CLAUDE_RESUMED_PATHS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(path.to_path_buf());
+        Some(SourceParse {
+            messages: parsed.messages,
+            cacheable: true,
+            claude_checkpoint: parsed.checkpoint,
+        })
     }
 
     fn load_or_parse_source_with_fingerprint_context<F, FingerprintFn>(
@@ -2440,7 +2555,22 @@ fn parse_all_messages_streaming<S: MessageSink>(
                         Some(&claude_home),
                     )
                 },
-                |path| sessions::claudecode::parse_claude_file_with_home(path, Some(&claude_home)),
+                |path| {
+                    let parsed = sessions::claudecode::parse_claude_file_with_checkpoint(
+                        path,
+                        Some(&claude_home),
+                    );
+                    SourceParse {
+                        messages: parsed.messages,
+                        cacheable: true,
+                        claude_checkpoint: parsed.checkpoint,
+                    }
+                },
+                Some(&|path: &Path,
+                       entry: &message_cache::CachedSourceEntry,
+                       fingerprint: &message_cache::SourceFingerprint| {
+                    resume_claude_source(path, entry, fingerprint, &claude_home)
+                }),
             )
         })
         .collect();
@@ -7376,7 +7506,7 @@ mod tests {
         dedupe_latest_trae_messages, filter_messages_for_report,
         generate_graph_with_loaded_pricing, get_home_dir_string, is_generic_routing_label,
         merge_claude_cross_file_duplicate, message_cache, message_passes_report_filter,
-        normalize_model_for_grouping, opencode_json_superseded_by_sqlite,
+        normalize_model_for_grouping, normalize_syntactic, opencode_json_superseded_by_sqlite,
         parse_all_messages_with_pricing_with_cache_policy,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
         parse_local_unified_messages, parse_local_unified_messages_deferred, parsed_to_unified,
@@ -9397,13 +9527,17 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_model_for_grouping_handles_non_ascii_names() {
-        assert_eq!(normalize_model_for_grouping("按需模型"), "按需模型");
-        assert_eq!(
-            normalize_model_for_grouping("按需模型-20241022"),
-            "按需模型"
-        );
-        assert_eq!(normalize_model_for_grouping("-12345678"), "-12345678");
+    fn test_normalize_syntactic_handles_non_ascii_names() {
+        for (input, expected) in [
+            ("按需模型", "按需模型"),
+            ("按需模型-20241022", "按需模型"),
+            ("model-按需", "model-按需"),
+            ("🚀-20241022", "🚀"),
+            ("🚀-１２３４５６７８", "🚀-１２３４５６７８"),
+            ("-12345678", "-12345678"),
+        ] {
+            assert_eq!(normalize_syntactic(input), expected, "input: {input}");
+        }
     }
 
     #[test]
@@ -11374,6 +11508,206 @@ mod tests {
                 .as_deref()
                 .is_some_and(|k| k.contains(":tool_result:"))),
             "the phantom tool_result row must not survive the rebuild"
+        );
+    }
+
+    /// A Claude Code transcript that only grew since the last scan continues
+    /// from its checkpoint, also after the checkpoint went through a shard on
+    /// disk, and the result equals a cold scan of the same bytes. One that was
+    /// rewritten before it grew takes the full parse.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_grown_transcript_resumes_and_matches_a_cold_scan() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let cold_cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mut env = redirect_cache_home(cache_home.path());
+
+        let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("demo");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let path = claude_dir.join("session.jsonl");
+        let turn = |n: u32, output: u32| {
+            format!(
+                "{}\n{}\n",
+                format_args!(
+                    r#"{{"type":"user","timestamp":"2026-10-01T10:{n:02}:00.000Z","message":{{"role":"user","content":"turn {n}"}}}}"#
+                ),
+                format_args!(
+                    r#"{{"type":"assistant","timestamp":"2026-10-01T10:{n:02}:05.000Z","requestId":"req_{n}","message":{{"id":"msg_{n}","model":"claude-sonnet-4-5","usage":{{"input_tokens":10,"output_tokens":{output},"cache_read_input_tokens":100}}}}}}"#
+                ),
+            )
+        };
+        // The streamed completion of a response whose first line is already
+        // before the checkpoint.
+        let completion = |n: u32, output: u32| {
+            format!(
+                "{}\n",
+                format_args!(
+                    r#"{{"type":"assistant","timestamp":"2026-10-01T10:{n:02}:09.000Z","requestId":"req_{n}","message":{{"id":"msg_{n}","model":"claude-sonnet-4-5","usage":{{"input_tokens":10,"output_tokens":{output},"cache_read_input_tokens":100}}}}}}"#
+                ),
+            )
+        };
+        let append = |text: &str| {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+        };
+        let scan = || {
+            let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            messages.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+            messages
+                .into_iter()
+                .map(|message| {
+                    (
+                        message.dedup_key,
+                        message.timestamp,
+                        message.duration_ms,
+                        message.is_turn_start,
+                        message.tokens,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let resumes = || {
+            crate::CLAUDE_RESUMED_PATHS
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|resumed| resumed.ends_with("demo/session.jsonl"))
+                .filter(|resumed| resumed.starts_with(source_home.path()))
+                .count()
+        };
+        let cold_scans = std::cell::Cell::new(0);
+        let cold_scan = |env: &mut crate::paths::test_env::EnvGuard| {
+            // A fresh cache home each time, so nothing is warm.
+            cold_scans.set(cold_scans.get() + 1);
+            let cold_dir = cold_cache_home.path().join(cold_scans.get().to_string());
+            point_cache_home(env, &cold_dir);
+            let cold = scan();
+            point_cache_home(env, cache_home.path());
+            cold
+        };
+
+        std::fs::write(&path, format!("{}{}", turn(1, 5), turn(2, 1))).unwrap();
+        assert_eq!(scan().len(), 2, "seed scan");
+        assert_eq!(resumes(), 0);
+
+        append(&format!("{}{}", completion(2, 50), turn(3, 7)));
+        let warm = scan();
+        assert_eq!(
+            resumes(),
+            1,
+            "a grown transcript resumes from its checkpoint"
+        );
+        assert_eq!(
+            warm,
+            cold_scan(&mut env),
+            "the resumed scan equals a cold one"
+        );
+        assert_eq!(
+            warm.len(),
+            3,
+            "the streamed completion merges into its turn"
+        );
+
+        // Every scan above wrote its entry back, so this checkpoint was read
+        // from a shard on disk.
+        append(&format!("{}{}", turn(4, 9), completion(4, 90)));
+        let warm = scan();
+        assert_eq!(resumes(), 2, "the checkpoint survives the shard round trip");
+        assert_eq!(warm, cold_scan(&mut env));
+
+        // Rewritten in place, then grown: the full parse.
+        let rewritten = std::fs::read_to_string(&path).unwrap().replacen(
+            "\"output_tokens\":5,",
+            "\"output_tokens\":6,",
+            1,
+        );
+        std::fs::write(&path, rewritten).unwrap();
+        append(&turn(5, 3));
+        let warm = scan();
+        assert_eq!(resumes(), 2, "a rewritten transcript does not resume");
+        assert_eq!(warm, cold_scan(&mut env));
+    }
+
+    /// A subagent transcript takes its name from its `.meta.json` sidecar, so
+    /// when the sidecar changed as the transcript grew, the messages before
+    /// the checkpoint change too and the transcript is parsed in full.
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_grown_transcript_with_a_changed_sidecar_is_parsed_in_full() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let cold_cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mut env = redirect_cache_home(cache_home.path());
+
+        let claude_dir = client_scan_root(source_home.path(), ClientId::Claude).join("demo");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let path = claude_dir.join("agent-sidecar1.jsonl");
+        let meta = claude_dir.join("agent-sidecar1.meta.json");
+        let line = |n: u32| {
+            format!(
+                "{}\n",
+                format_args!(
+                    r#"{{"type":"assistant","isSidechain":true,"sessionId":"parent-1","agentId":"sidecar1","timestamp":"2026-10-01T10:{n:02}:05.000Z","requestId":"req_{n}","message":{{"id":"msg_{n}","model":"claude-sonnet-4-5","usage":{{"input_tokens":10,"output_tokens":5}}}}}}"#
+                ),
+            )
+        };
+        let scan = || {
+            let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &["claude".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            );
+            messages.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+            messages
+                .into_iter()
+                .map(|message| (message.dedup_key, message.agent, message.tokens))
+                .collect::<Vec<_>>()
+        };
+
+        std::fs::write(&meta, r#"{"agentType":"explorer"}"#).unwrap();
+        std::fs::write(&path, line(1)).unwrap();
+        let seed = scan();
+        assert_eq!(seed.len(), 1, "seed scan");
+
+        std::fs::write(&meta, r#"{"agentType":"reviewer"}"#).unwrap();
+        {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(line(2).as_bytes())
+                .unwrap();
+        }
+        let warm = scan();
+
+        point_cache_home(&mut env, cold_cache_home.path());
+        let cold = scan();
+        point_cache_home(&mut env, cache_home.path());
+        assert_eq!(cold.len(), 2);
+        assert_ne!(cold[0].1, seed[0].1, "the rename reaches a cold scan");
+        assert_eq!(warm, cold, "both messages carry the renamed agent");
+        assert!(
+            !crate::CLAUDE_RESUMED_PATHS
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|resumed| resumed.starts_with(source_home.path())),
+            "a changed sidecar takes the full parse"
         );
     }
 

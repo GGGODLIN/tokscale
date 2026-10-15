@@ -87,7 +87,7 @@ export default async function GroupPage({ params }: GroupPageProps) {
 
   const [memberCount, initialData] = await Promise.all([
     getGroupMemberCount(group.id),
-    getGroupLeaderboardData(group.id, "all", 1, 50, "tokens"),
+    getGroupLeaderboardData(group.id, "all", 1, 50, "tokens", "", group.timeZone, group.weekStartsOn),
   ]);
 
   return (
@@ -100,6 +100,8 @@ export default async function GroupPage({ params }: GroupPageProps) {
           description: group.description,
           avatarUrl: group.avatarUrl,
           isPublic: group.isPublic,
+          timeZone: group.timeZone,
+          weekStartsOn: group.weekStartsOn,
           memberCount,
           membership,
         }}
