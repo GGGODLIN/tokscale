@@ -5260,7 +5260,7 @@ mod tests {
         cache.save_if_dirty();
         let warm = SourceMessageCache::load();
         let cached = warm.get(identity, &source).unwrap();
-        assert_eq!(cached.parser_version, 16);
+        assert_eq!(cached.parser_version, 17);
         assert_eq!(cached.messages, parsed);
     }
 
