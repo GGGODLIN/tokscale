@@ -248,7 +248,12 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
     let hint_style = app.theme.hint_key_style();
     let count_style = app.theme.count_style();
 
-    let compact_spans = || {
+    let compact_spans = |bracket_keys: bool| {
+        let shortcuts = if bracket_keys {
+            ["[s]", "[k]", "[g]", "[p]", "[r]"]
+        } else {
+            ["s", "k", "g", "p", "r"]
+        };
         let mut spans = vec![
             Span::styled(
                 app.glyphs.vertical_navigation,
@@ -271,22 +276,27 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
                 app.glyphs.compact_separator,
                 Style::default().fg(app.theme.muted),
             ),
-            Span::styled("[s]", count_style),
+            Span::styled(shortcuts[0], count_style),
             Span::styled(
                 app.glyphs.compact_separator,
                 Style::default().fg(app.theme.muted),
             ),
-            Span::styled("[g]", count_style),
+            Span::styled(shortcuts[1], count_style),
             Span::styled(
                 app.glyphs.compact_separator,
                 Style::default().fg(app.theme.muted),
             ),
-            Span::styled("[p]", Style::default().fg(Color::Magenta)),
+            Span::styled(shortcuts[2], count_style),
             Span::styled(
                 app.glyphs.compact_separator,
                 Style::default().fg(app.theme.muted),
             ),
-            Span::styled("[r]", hint_style),
+            Span::styled(shortcuts[3], Style::default().fg(Color::Magenta)),
+            Span::styled(
+                app.glyphs.compact_separator,
+                Style::default().fg(app.theme.muted),
+            ),
+            Span::styled(shortcuts[4], hint_style),
             Span::styled(
                 app.glyphs.compact_separator,
                 Style::default().fg(app.theme.muted),
@@ -352,9 +362,17 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         }
         spans
     };
+    let fitting_compact_spans = || {
+        let spans = compact_spans(true);
+        if spans.iter().map(Span::width).sum::<usize>() <= usize::from(area.width) {
+            spans
+        } else {
+            compact_spans(false)
+        }
+    };
 
     let spans = if is_very_narrow {
-        compact_spans()
+        fitting_compact_spans()
     } else {
         let lang = app.settings.tui_language;
         let mut spans = vec![
@@ -498,7 +516,7 @@ fn render_help_row(frame: &mut Frame, app: &App, area: Rect) {
         if spans.iter().map(Span::width).sum::<usize>() <= usize::from(area.width) {
             spans
         } else {
-            compact_spans()
+            fitting_compact_spans()
         }
     };
 
@@ -698,6 +716,7 @@ mod tests {
         let quit_hint = tr(app.settings.tui_language, MessageKey::HelpQuit);
         assert!(full.ends_with(quit_hint), "{context}: {full}");
         assert!(compact.contains(quit_hint), "{context}: {compact}");
+        assert!(compact.contains("[k]"), "{context}: {compact}");
         let full_width = unicode_width::UnicodeWidthStr::width(full.as_str());
 
         for terminal_width in 60..=200 {
@@ -793,6 +812,13 @@ mod tests {
                 &format!("auto_refresh={auto_refresh}, refresh_secs={refresh_secs}"),
             );
         }
+    }
+
+    #[test]
+    fn very_narrow_sessions_footer_preserves_all_compact_hints() {
+        let mut app = make_app_on(Tab::Sessions);
+        let actual = rendered_help_text(&mut app, 40, 40);
+        assert_eq!(actual, "▴▾∙◂▸∙d/t/c∙s∙k∙g∙p∙r∙q∙↵/i∙b");
     }
 
     #[test]
