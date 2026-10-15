@@ -313,7 +313,7 @@ impl SessionColumn {
                 if s.turn_count > 0 {
                     s.turn_count.to_string()
                 } else {
-                    "\u{2014}".to_string()
+                    app.glyphs.missing.to_string()
                 },
                 ctx,
             )),
@@ -327,7 +327,12 @@ impl SessionColumn {
             Self::CacheWrite => Cell::from(self.fit(format_tokens(s.tokens.cache_write), ctx))
                 .style(app.theme.metric_cache_write_style()),
             Self::CacheHit => Cell::from(self.fit(
-                format_cache_hit_rate(s.tokens.cache_read, s.tokens.input, s.tokens.cache_write),
+                format_cache_hit_rate(
+                    s.tokens.cache_read,
+                    s.tokens.input,
+                    s.tokens.cache_write,
+                    app.glyphs,
+                ),
                 ctx,
             ))
             .style(app.theme.count_style()),
@@ -337,19 +342,21 @@ impl SessionColumn {
                 .style(app.theme.metric_total_style()),
             Self::Cost => Cell::from(self.fit(format_cost(s.cost), ctx))
                 .style(Style::default().fg(Color::Green)),
-            Self::CostPerMillion => {
-                Cell::from(self.fit(format_cost_per_million(s.cost, s.tokens.total()), ctx))
-                    .style(Style::default().fg(Color::Rgb(150, 200, 150)))
-            }
-            Self::Duration => {
-                Cell::from(self.fit(format_duration(s.first_active_ms, s.last_active_ms), ctx))
-                    .style(app.theme.hint_key_style())
-            }
+            Self::CostPerMillion => Cell::from(self.fit(
+                format_cost_per_million(s.cost, s.tokens.total(), app.glyphs),
+                ctx,
+            ))
+            .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+            Self::Duration => Cell::from(self.fit(
+                format_duration(s.first_active_ms, s.last_active_ms, app.glyphs),
+                ctx,
+            ))
+            .style(app.theme.hint_key_style()),
             Self::LastActive => Cell::from(
                 self.fit(
                     ms_to_local_naive(s.last_active_ms)
                         .map(|dt| dt.format(ctx.last_active_fmt).to_string())
-                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                        .unwrap_or_else(|| app.glyphs.missing.to_string()),
                     ctx,
                 ),
             )
@@ -738,7 +745,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if session.turn_count > 0 {
                         session.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -822,12 +829,13 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// A multi-model session always ends in an ellipsis when some of its models did
 /// not fit, so a session that switched models never renders as a single-model
 /// one. One cell is held back for that marker when there is more than one model.
-/// The marker is [`MIDDLE_ELLIPSIS`], which is one cell in every terminal
+/// The marker comes from the active glyph set; the safe marker is one cell in every terminal
 /// locale; U+2026 is East-Asian-Ambiguous and would be two cells under a CJK
 /// locale, overflowing the budget this cell promises to keep.
 fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cell<'static> {
     if models.is_empty() {
-        return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
+        return Cell::from(app.glyphs.missing.to_string())
+            .style(Style::default().fg(app.theme.muted));
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();
@@ -900,9 +908,9 @@ fn ms_to_local_naive(ms: i64) -> Option<NaiveDateTime> {
 
 /// Human-readable elapsed time between first and last message in a session.
 /// Returns "—" when the bounds are missing or inverted.
-fn format_duration(first_ms: i64, last_ms: i64) -> String {
+fn format_duration(first_ms: i64, last_ms: i64, glyphs: crate::ui_glyphs::Glyphs) -> String {
     if first_ms <= 0 || last_ms <= 0 || last_ms < first_ms {
-        return "\u{2014}".to_string();
+        return glyphs.missing.to_string();
     }
     let secs = (last_ms - first_ms) / 1000;
     if secs <= 0 {
@@ -2329,22 +2337,52 @@ mod tests {
 
     #[test]
     fn format_duration_handles_days_hours_minutes_seconds() {
-        assert_eq!(format_duration(0, 1000), "—");
-        assert_eq!(format_duration(1000, 500), "—");
-        assert_eq!(format_duration(1000, 1000), "0s");
-        assert_eq!(format_duration(0, 0), "—");
-        assert_eq!(format_duration(1000, 2000), "1s");
-        assert_eq!(format_duration(1000, 61_000), "1m");
-        assert_eq!(format_duration(1000, 3_661_000), "1h 1m");
-        assert_eq!(format_duration(1000, 90_061_000), "1d 1h");
+        assert_eq!(
+            format_duration(0, 1000, crate::ui_glyphs::Glyphs::unicode()),
+            "—"
+        );
+        assert_eq!(
+            format_duration(1000, 500, crate::ui_glyphs::Glyphs::unicode()),
+            "—"
+        );
+        assert_eq!(
+            format_duration(1000, 1000, crate::ui_glyphs::Glyphs::unicode()),
+            "0s"
+        );
+        assert_eq!(
+            format_duration(0, 0, crate::ui_glyphs::Glyphs::unicode()),
+            "—"
+        );
+        assert_eq!(
+            format_duration(1000, 2000, crate::ui_glyphs::Glyphs::unicode()),
+            "1s"
+        );
+        assert_eq!(
+            format_duration(1000, 61_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1m"
+        );
+        assert_eq!(
+            format_duration(1000, 3_661_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1h 1m"
+        );
+        assert_eq!(
+            format_duration(1000, 90_061_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1d 1h"
+        );
     }
 
     #[test]
     fn format_duration_boundary_units() {
         // exactly one hour without extra minutes (use a real first_ms since
         // first_ms == 0 short-circuits to "—")
-        assert_eq!(format_duration(1_000, 3_601_000), "1h 0m");
+        assert_eq!(
+            format_duration(1_000, 3_601_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1h 0m"
+        );
         // exactly one day
-        assert_eq!(format_duration(1_000, 86_401_000), "1d 0h");
+        assert_eq!(
+            format_duration(1_000, 86_401_000, crate::ui_glyphs::Glyphs::unicode()),
+            "1d 0h"
+        );
     }
 }

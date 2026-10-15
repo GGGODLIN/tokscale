@@ -185,12 +185,19 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
             });
-            let speed_cell =
-                Cell::from(format_ms_per_1k(day.performance.ms_per_1k_tokens)).style(speed_style);
+            let speed_cell = Cell::from(format_ms_per_1k(
+                day.performance.ms_per_1k_tokens,
+                app.glyphs,
+            ))
+            .style(speed_style);
             let cost_cell =
                 Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green));
-            let cost_per_m_cell = Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
-                .style(Style::default().fg(Color::Rgb(150, 200, 150)));
+            let cost_per_m_cell = Cell::from(format_cost_per_million(
+                day.cost,
+                day.tokens.total(),
+                app.glyphs,
+            ))
+            .style(Style::default().fg(Color::Rgb(150, 200, 150)));
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![date_cell, cost_cell]

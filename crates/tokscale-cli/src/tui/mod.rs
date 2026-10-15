@@ -346,11 +346,12 @@ pub fn run(
     // Forced modes need no capability query. Auto probes only while raw mode
     // and the alternate screen are active; the probe is erased before the
     // first frame and degrades to Unknown when DSR is unavailable.
-    let ambient_width = if settings::Settings::load().glyphs == settings::GlyphMode::Auto {
+    let probe = if settings::Settings::load().glyphs == settings::GlyphMode::Auto {
         glyph_probe::probe_ambient_width(&mut stdout)
     } else {
-        glyph_probe::AmbientWidth::Unknown
+        glyph_probe::ProbeResult::default()
     };
+    let ambient_width = probe.width;
 
     // From here on the TUI owns raw mode and the alternate screen for its
     // whole run. Background diagnostics (e.g. cache save warnings) must not
@@ -428,7 +429,8 @@ pub fn run(
         flag
     };
 
-    let mut events = EventHandler::new(Duration::from_millis(100));
+    let mut events =
+        EventHandler::new_with_pending_keys(Duration::from_millis(100), probe.pending_keys);
 
     let result = run_loop_with_background(
         &mut terminal,

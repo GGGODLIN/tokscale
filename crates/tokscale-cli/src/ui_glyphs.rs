@@ -21,12 +21,15 @@ pub(crate) struct Glyphs {
     pub border: BorderSet,
     pub scrollbar_up: &'static str,
     pub scrollbar_down: &'static str,
+    pub range_down: &'static str,
     pub scrollbar_track: &'static str,
     pub scrollbar_thumb: &'static str,
     pub tab_divider: &'static str,
     pub axis_vertical: char,
     pub axis_horizontal: char,
     pub ellipsis: &'static str,
+    pub missing: &'static str,
+    pub infinity: &'static str,
     pub sort_up: &'static str,
     pub sort_down: &'static str,
     pub vertical_navigation: &'static str,
@@ -74,12 +77,15 @@ impl Glyphs {
             border: ratatui::symbols::border::PLAIN,
             scrollbar_up: "▲",
             scrollbar_down: "▼",
+            range_down: "↓",
             scrollbar_track: "║",
             scrollbar_thumb: "█",
             tab_divider: " │ ",
             axis_vertical: '│',
             axis_horizontal: '─',
             ellipsis: "…",
+            missing: "—",
+            infinity: "∞",
             sort_up: " ▲",
             sort_down: " ▼",
             vertical_navigation: "↑↓",
@@ -119,12 +125,15 @@ impl Glyphs {
             },
             scrollbar_up: "▴",
             scrollbar_down: "▾",
+            range_down: "▾",
             scrollbar_track: "|",
             scrollbar_thumb: "▮",
             tab_divider: " | ",
             axis_vertical: '|',
             axis_horizontal: '-',
             ellipsis: "⋯",
+            missing: "-",
+            infinity: "inf",
             sort_up: " ▴",
             sort_down: " ▾",
             vertical_navigation: "▴▾",
@@ -170,10 +179,13 @@ mod tests {
         for symbol in [
             glyphs.scrollbar_up,
             glyphs.scrollbar_down,
+            glyphs.range_down,
             glyphs.scrollbar_track,
             glyphs.scrollbar_thumb,
             glyphs.tab_divider,
             glyphs.ellipsis,
+            glyphs.missing,
+            glyphs.infinity,
             glyphs.sort_up,
             glyphs.sort_down,
             glyphs.vertical_navigation,
@@ -230,13 +242,15 @@ mod tests {
         let g = Glyphs::unicode();
         assert_eq!(g.border.top_left, "┌");
         assert_eq!(g.tab_divider, " │ ");
+        assert_eq!(g.range_down, "↓");
         assert_eq!((g.sort_up, g.sort_down), (" ▲", " ▼"));
         assert_eq!(
             (g.vertical_navigation, g.horizontal_navigation),
             ("↑↓", "←→")
         );
         assert_eq!((g.scanner_active, g.scanner_inactive), ("■", "⬝"));
-        assert_eq!((g.ellipsis, g.legend_dot), ("…", "●"));
+        assert_eq!((g.ellipsis, g.missing, g.infinity), ("…", "—", "∞"));
+        assert_eq!(g.legend_dot, "●");
         assert_eq!(g.chart_blocks, &UNICODE_BLOCKS);
     }
 
@@ -316,6 +330,9 @@ mod tests {
             "\"─\"",
             "\"│\"",
             "\"── \"",
+            "\"—\"",
+            "\"∞\"",
+            "\\u{2014}",
         ];
 
         for path in files {

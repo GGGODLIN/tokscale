@@ -234,7 +234,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
         if count > 0 {
             count.to_string()
         } else {
-            "\u{2014}".to_string()
+            app.glyphs.missing.to_string()
         }
     };
 
@@ -323,12 +323,17 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
                     hour.tokens.cache_read,
                     hour.tokens.input,
                     hour.tokens.cache_write,
+                    app.glyphs,
                 ))
                 .style(app.theme.count_style()),
                 total_tokens_cell(hour.tokens.total(), &app.theme),
                 Cell::from(format_cost(hour.cost)).style(Style::default().fg(Color::Green)),
-                Cell::from(format_cost_per_million(hour.cost, hour.tokens.total()))
-                    .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+                Cell::from(format_cost_per_million(
+                    hour.cost,
+                    hour.tokens.total(),
+                    app.glyphs,
+                ))
+                .style(Style::default().fg(Color::Rgb(150, 200, 150))),
             ]);
             cells
         };

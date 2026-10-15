@@ -246,7 +246,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if minute.turn_count > 0 {
                         minute.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -271,7 +271,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if minute.turn_count > 0 {
                         minute.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -287,6 +287,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         minute.tokens.cache_read,
                         minute.tokens.input,
                         minute.tokens.cache_write,
+                        app.glyphs,
                     ))
                     .style(app.theme.count_style()),
                     total_tokens_cell(minute.tokens.total(), &app.theme),

@@ -307,7 +307,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if day.turn_count > 0 {
                         day.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -330,7 +330,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                     let turn_str = if day.turn_count > 0 {
                         day.turn_count.to_string()
                     } else {
-                        "\u{2014}".to_string()
+                        app.glyphs.missing.to_string()
                     };
                     cells.push(Cell::from(turn_str));
                 }
@@ -345,12 +345,17 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
                         day.tokens.cache_read,
                         day.tokens.input,
                         day.tokens.cache_write,
+                        app.glyphs,
                     ))
                     .style(app.theme.count_style()),
                     total_tokens_cell(day.tokens.total(), &app.theme),
                     Cell::from(format_cost(day.cost)).style(Style::default().fg(Color::Green)),
-                    Cell::from(format_cost_per_million(day.cost, day.tokens.total()))
-                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+                    Cell::from(format_cost_per_million(
+                        day.cost,
+                        day.tokens.total(),
+                        app.glyphs,
+                    ))
+                    .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                 ]);
                 cells
             };
@@ -583,13 +588,14 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                         row.tokens.cache_read,
                         row.tokens.input,
                         row.tokens.cache_write,
+                        app.glyphs,
                     ))
                     .style(app.theme.count_style()),
                     total_tokens_cell(row.tokens.total(), &app.theme),
                 ];
                 if with_speed {
                     cells.push(
-                        Cell::from(format_ms_per_1k(row.ms_per_1k_tokens))
+                        Cell::from(format_ms_per_1k(row.ms_per_1k_tokens, app.glyphs))
                             .style(app.theme.hint_key_style()),
                     );
                 }
@@ -598,8 +604,12 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                 );
                 if with_speed {
                     cells.push(
-                        Cell::from(format_cost_per_million(row.cost, row.tokens.total()))
-                            .style(Style::default().fg(Color::Rgb(150, 200, 150))),
+                        Cell::from(format_cost_per_million(
+                            row.cost,
+                            row.tokens.total(),
+                            app.glyphs,
+                        ))
+                        .style(Style::default().fg(Color::Rgb(150, 200, 150))),
                     );
                 }
                 cells

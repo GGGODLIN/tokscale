@@ -55,9 +55,9 @@ pub fn format_cost(cost: f64) -> String {
 
 /// Cost per million tokens: useful for comparing model efficiency across sessions.
 /// Returns "—" when there are no tokens to avoid division by zero.
-pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
+pub fn format_cost_per_million(cost: f64, total_tokens: u64, glyphs: Glyphs) -> String {
     if total_tokens == 0 || !cost.is_finite() || cost < 0.0 {
-        return "\u{2014}".to_string(); // —
+        return glyphs.missing.to_string();
     }
     let per_m = cost / (total_tokens as f64) * 1_000_000.0;
     format!("${:.2}", per_m)
@@ -66,25 +66,30 @@ pub fn format_cost_per_million(cost: f64, total_tokens: u64) -> String {
 /// Cache reuse multiplier: cached reads per full-price input token.
 /// `cache_read / (input + cache_write)` — how many low-cost reads you
 /// got for every token you paid full price (fresh input or cache write).
-pub fn format_cache_hit_rate(cache_read: u64, input: u64, cache_write: u64) -> String {
+pub fn format_cache_hit_rate(
+    cache_read: u64,
+    input: u64,
+    cache_write: u64,
+    glyphs: Glyphs,
+) -> String {
     let paid = input.saturating_add(cache_write);
     if paid == 0 {
         return if cache_read > 0 {
-            "∞".to_string()
+            glyphs.infinity.to_string()
         } else {
-            "—".to_string()
+            glyphs.missing.to_string()
         };
     }
     let ratio = cache_read as f64 / paid as f64;
     format!("{:.1}x", ratio)
 }
 
-pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>) -> String {
+pub fn format_ms_per_1k(ms_per_1k_tokens: Option<f64>, glyphs: Glyphs) -> String {
     let Some(value) = ms_per_1k_tokens else {
-        return "—".to_string();
+        return glyphs.missing.to_string();
     };
     if !value.is_finite() || value <= 0.0 {
-        "—".to_string()
+        glyphs.missing.to_string()
     } else if value >= 1000.0 {
         format!("{:.1}s", value / 1000.0)
     } else {
@@ -543,7 +548,7 @@ pub(crate) fn truncate_ellipsis_with_marker(s: &str, max_chars: usize, marker: &
     }
 }
 
-/// [`truncate_ellipsis`] measured in terminal cells instead of code points.
+/// [`truncate_ellipsis_with_marker`] measured in terminal cells instead of code points.
 ///
 /// A string holding full-width graphemes is cut against the width ratatui will
 /// actually draw it at. A code-point budget lets `활성 · 한도부족` (9 code
@@ -551,7 +556,7 @@ pub(crate) fn truncate_ellipsis_with_marker(s: &str, max_chars: usize, marker: &
 /// it at the panel edge with no marker at all, which is the failure this exists
 /// to prevent.
 ///
-/// The marker is [`MIDDLE_ELLIPSIS`], not U+2026 `…`: U+2026 is
+/// In safe mode the marker is U+22EF, not U+2026 `…`: U+2026 is
 /// East-Asian-Ambiguous and draws two cells in a CJK-locale terminal, which is
 /// exactly where the translated text this helper fits is read. A one-cell
 /// budget has to stay one cell there too.
@@ -1037,6 +1042,24 @@ mod tests {
     /// On pure ASCII the cell version cuts at the same place as the code-point
     /// version and differs only in its marker: `⋯` instead of the
     /// East-Asian-Ambiguous `…`, so the marker is one cell in every terminal.
+    #[test]
+    fn safe_numeric_fallbacks_are_ambient_width_invariant() {
+        let glyphs = Glyphs::ascii_safe();
+        let values = [
+            format_cost_per_million(1.0, 0, glyphs),
+            format_cache_hit_rate(0, 0, 0, glyphs),
+            format_cache_hit_rate(1, 0, 0, glyphs),
+            format_ms_per_1k(None, glyphs),
+        ];
+        assert_eq!(values, ["-", "-", "inf", "-"]);
+        for value in values {
+            assert_eq!(
+                UnicodeWidthStr::width(value.as_str()),
+                UnicodeWidthStr::width_cjk(value.as_str())
+            );
+        }
+    }
+
     #[test]
     fn truncate_ellipsis_to_width_cuts_ascii_where_the_char_version_does() {
         for budget in 0..=24 {

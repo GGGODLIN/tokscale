@@ -100,7 +100,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn status_label(app: &App) -> String {
-    let separator = app.glyphs.separator;
+    let separator = app.glyphs.compact_separator;
     let lang = app.settings.tui_language;
     if app.is_fetching_usage() {
         return tr(lang, MessageKey::StatusSyncingUsage).to_string();
@@ -171,7 +171,7 @@ fn usage_inventory(outputs: &[UsageOutput]) -> UsageInventory {
 }
 
 fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize, glyphs: Glyphs) -> String {
-    let separator = glyphs.separator;
+    let separator = glyphs.compact_separator;
     let saved_label = if saved == 1 {
         tr(lang, MessageKey::StatusSavedSingular)
     } else {
@@ -1072,7 +1072,7 @@ fn usage_status_summary_lines(
     width: usize,
     height: usize,
 ) -> Vec<Line<'static>> {
-    let separator = app.glyphs.separator;
+    let separator = app.glyphs.compact_separator;
     let lang = app.settings.tui_language;
     let ready_count = outputs
         .iter()
@@ -1458,7 +1458,7 @@ fn attention_action_rank(output: &UsageOutput) -> u8 {
 }
 
 fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static> {
-    let separator = app.glyphs.separator;
+    let separator = app.glyphs.compact_separator;
     let status = readiness_status(output);
     let metric = display_metric(output);
     let detail = metric
@@ -1531,7 +1531,7 @@ fn provider_summary_line(
     group: &UsageProviderGroup<'_>,
     _width: usize,
 ) -> Line<'static> {
-    let separator = app.glyphs.separator;
+    let separator = app.glyphs.compact_separator;
     let saved = group
         .outputs
         .iter()
@@ -1983,7 +1983,7 @@ fn format_credit_expiry_label(value: &str) -> String {
 }
 
 fn selected_status_line(lang: TuiLanguage, output: &UsageOutput, glyphs: Glyphs) -> String {
-    let separator = glyphs.separator;
+    let separator = glyphs.compact_separator;
     let plan = output
         .plan
         .as_deref()
@@ -2077,7 +2077,7 @@ fn account_readiness_label(
     readiness: UsageReadiness,
     glyphs: Glyphs,
 ) -> String {
-    let separator = glyphs.separator;
+    let separator = glyphs.compact_separator;
     let account_state = account_state_label(lang, output);
     let readiness = readiness_label(lang, readiness);
     if account_state.eq_ignore_ascii_case(readiness) {
@@ -2088,7 +2088,7 @@ fn account_readiness_label(
 }
 
 fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'static> {
-    let separator = app.glyphs.separator;
+    let separator = app.glyphs.compact_separator;
     let ready = outputs
         .iter()
         .filter(|output| readiness_status(output) == UsageReadiness::Ready)
@@ -2342,7 +2342,7 @@ fn account_table_widths(width: u16) -> [Constraint; 8] {
 }
 
 fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rect) -> Row<'static> {
-    let separator = app.glyphs.separator;
+    let separator = app.glyphs.compact_separator;
     let selected = app.selected_index == index;
     let width = area.width as usize;
     let row = usage_row_view(app, output);
@@ -2470,7 +2470,7 @@ fn usage_row_view<'a>(app: &App, output: &'a UsageOutput) -> UsageRowView<'a> {
 }
 
 fn metric_summary(lang: TuiLanguage, output: &UsageOutput, glyphs: Glyphs) -> String {
-    let spaced_separator = glyphs.spaced_separator;
+    let spaced_separator = format!(" {} ", glyphs.compact_separator);
     if output.metrics.is_empty() {
         return tr(lang, MessageKey::UsageNoLimits).to_string();
     }
@@ -2484,7 +2484,7 @@ fn metric_summary(lang: TuiLanguage, output: &UsageOutput, glyphs: Glyphs) -> St
             format!("{label} {:.0}%", metric.remaining_percent)
         })
         .collect::<Vec<_>>();
-    parts.join(spaced_separator)
+    parts.join(&spaced_separator)
 }
 
 fn compact_metric_label(label: &str) -> String {
@@ -2799,7 +2799,7 @@ fn next_reset_label(app: &App, outputs: &[UsageOutput]) -> Option<String> {
 }
 
 fn output_reset_label(app: &App, output: &UsageOutput) -> Option<String> {
-    let separator = app.glyphs.separator;
+    let separator = app.glyphs.compact_separator;
     let metric = display_metric(output)?;
     let reset = metric.resets_at.as_ref()?;
     Some(format!(
@@ -2959,7 +2959,7 @@ fn reset_credit_count_label(lang: TuiLanguage, count: u32) -> String {
 }
 
 fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput], glyphs: Glyphs) -> String {
-    let separator = glyphs.separator;
+    let separator = glyphs.compact_separator;
     let available: u32 = outputs
         .iter()
         .filter(|output| output.provider == "Codex")
@@ -2995,7 +2995,7 @@ fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput], glyphs: Glyphs
 }
 
 fn credits_status_line(output: &UsageOutput, glyphs: Glyphs) -> Option<String> {
-    let spaced_separator = glyphs.spaced_separator;
+    let spaced_separator = format!(" {} ", glyphs.compact_separator);
     let mut parts = Vec::new();
     if let Some(credits) = &output.credit_status {
         if let Some(balance) = credits.balance.as_deref() {
@@ -3024,7 +3024,7 @@ fn credits_status_line(output: &UsageOutput, glyphs: Glyphs) -> Option<String> {
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(spaced_separator))
+        Some(parts.join(&spaced_separator))
     }
 }
 

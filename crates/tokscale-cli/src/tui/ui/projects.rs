@@ -219,6 +219,7 @@ impl ProjectColumn {
                 p.tokens.cache_read,
                 p.tokens.input,
                 p.tokens.cache_write,
+                app.glyphs,
             )))
             .style(app.theme.count_style()),
             Self::Total => Cell::from(self.fit(format_tokens(p.tokens.total())))
@@ -230,7 +231,7 @@ impl ProjectColumn {
                 self.fit(
                     ms_to_local_naive(p.last_active_ms)
                         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                        .unwrap_or_else(|| app.glyphs.missing.to_string()),
                 ),
             )
             .style(Style::default().fg(app.theme.muted)),
@@ -476,7 +477,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 /// `", "` and truncated to `max_cells` in terminal cells. Mirrors the Sessions
 /// tab's model cell: a multi-model project always ends in an ellipsis when some
 /// of its models did not fit, so it never renders as a single-model one. The
-/// marker is [`MIDDLE_ELLIPSIS`], which is one cell in every terminal locale;
+/// marker comes from the active glyph set; the safe marker is one cell in every terminal locale;
 /// U+2026 is East-Asian-Ambiguous and would be two cells under a CJK locale,
 /// overflowing the budget this cell promises to keep.
 fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cell<'static> {
@@ -484,7 +485,8 @@ fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Ce
         return Cell::from("");
     }
     if models.is_empty() {
-        return Cell::from("\u{2014}".to_string()).style(Style::default().fg(app.theme.muted));
+        return Cell::from(app.glyphs.missing.to_string())
+            .style(Style::default().fg(app.theme.muted));
     }
 
     let mut spans: Vec<Span<'static>> = Vec::new();

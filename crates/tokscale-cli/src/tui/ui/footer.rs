@@ -113,31 +113,31 @@ fn render_main_row(frame: &mut Frame, app: &mut App, area: Rect) {
                     TuiLanguage::Ko => {
                         format!(
                             "{} {}-{} (총 {}개) ",
-                            app.glyphs.scrollbar_down, start, end, total_models
+                            app.glyphs.range_down, start, end, total_models
                         )
                     }
                     TuiLanguage::Ja => {
                         format!(
                             "{} {}-{} (全{}件) ",
-                            app.glyphs.scrollbar_down, start, end, total_models
+                            app.glyphs.range_down, start, end, total_models
                         )
                     }
                     TuiLanguage::ZhCn => {
                         format!(
                             "{} {}-{} (共{}项) ",
-                            app.glyphs.scrollbar_down, start, end, total_models
+                            app.glyphs.range_down, start, end, total_models
                         )
                     }
                     TuiLanguage::Fr => {
                         format!(
                             "{} {}-{} sur {} ",
-                            app.glyphs.scrollbar_down, start, end, total_models
+                            app.glyphs.range_down, start, end, total_models
                         )
                     }
                     TuiLanguage::En => {
                         format!(
                             "{} {}-{} of {} ",
-                            app.glyphs.scrollbar_down, start, end, total_models
+                            app.glyphs.range_down, start, end, total_models
                         )
                     }
                 };

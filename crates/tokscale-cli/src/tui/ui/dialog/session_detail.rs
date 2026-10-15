@@ -103,7 +103,7 @@ impl SessionDetailDialog {
         } else {
             lines.push(kv_line(
                 tr(self.lang, MessageKey::SessionDetailDirectory),
-                Span::styled("\u{2014}", Style::default().fg(theme.muted)),
+                Span::styled(glyphs.missing, Style::default().fg(theme.muted)),
                 theme,
             ));
         }
@@ -111,7 +111,7 @@ impl SessionDetailDialog {
         if self.session.models.is_empty() {
             lines.push(kv_line(
                 tr(self.lang, MessageKey::ColModels),
-                Span::styled("\u{2014}", Style::default().fg(theme.muted)),
+                Span::styled(glyphs.missing, Style::default().fg(theme.muted)),
                 theme,
             ));
         } else if self.session.models.len() == 1 {
@@ -182,7 +182,7 @@ impl SessionDetailDialog {
         let turn_count = if self.session.turn_count > 0 {
             format_tokens_with_commas(self.session.turn_count as u64)
         } else {
-            "\u{2014}".to_string()
+            glyphs.missing.to_string()
         };
         lines.push(kv_line(
             tr(self.lang, MessageKey::ColTurn),
@@ -202,7 +202,11 @@ impl SessionDetailDialog {
         lines.push(kv_line(
             tr(self.lang, MessageKey::ColDuration),
             Span::styled(
-                format_duration(self.session.first_active_ms, self.session.last_active_ms),
+                format_duration(
+                    self.session.first_active_ms,
+                    self.session.last_active_ms,
+                    glyphs,
+                ),
                 theme.hint_key_style(),
             ),
             theme,
@@ -210,7 +214,7 @@ impl SessionDetailDialog {
 
         let first_active_str = ms_to_local_naive(self.session.first_active_ms)
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|| "\u{2014}".to_string());
+            .unwrap_or_else(|| glyphs.missing.to_string());
         lines.push(kv_line(
             tr(self.lang, MessageKey::SessionDetailFirstActive),
             Span::styled(first_active_str, Style::default().fg(theme.muted)),
@@ -219,7 +223,7 @@ impl SessionDetailDialog {
 
         let last_active_str = ms_to_local_naive(self.session.last_active_ms)
             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-            .unwrap_or_else(|| "\u{2014}".to_string());
+            .unwrap_or_else(|| glyphs.missing.to_string());
         lines.push(kv_line(
             tr(self.lang, MessageKey::ColLastActive),
             Span::styled(last_active_str, Style::default().fg(theme.muted)),
@@ -249,7 +253,7 @@ impl SessionDetailDialog {
         lines.push(kv_line(
             tr(self.lang, MessageKey::ColCostPer1M),
             Span::styled(
-                format_cost_per_million(self.session.cost, self.session.tokens.total()),
+                format_cost_per_million(self.session.cost, self.session.tokens.total(), glyphs),
                 Style::default().fg(Color::Rgb(150, 200, 150)),
             ),
             theme,
@@ -318,6 +322,7 @@ impl SessionDetailDialog {
                     self.session.tokens.cache_read,
                     self.session.tokens.input,
                     self.session.tokens.cache_write,
+                    glyphs,
                 ),
                 theme.count_style(),
             ),
@@ -602,9 +607,9 @@ fn ms_to_local_naive(ms: i64) -> Option<NaiveDateTime> {
     }
 }
 
-fn format_duration(first_ms: i64, last_ms: i64) -> String {
+fn format_duration(first_ms: i64, last_ms: i64, glyphs: Glyphs) -> String {
     if first_ms <= 0 || last_ms <= 0 || last_ms < first_ms {
-        return "\u{2014}".to_string();
+        return glyphs.missing.to_string();
     }
     let secs = (last_ms - first_ms) / 1000;
     if secs <= 0 {
