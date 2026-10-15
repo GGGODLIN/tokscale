@@ -376,10 +376,10 @@ pub fn parse_dsh_file(path: &Path) -> Vec<UnifiedMessage> {
                 };
                 // A log-only `assistant/attempt`, and an `assistant/message`
                 // whose usage sits in the compact stream, are charged from the
-                // last usage chunk of that stream, and the stream's own records
-                // can be written later than the outer row. The span has to close
-                // on the record that supplied the charged numbers, or the usage
-                // lands after the duration meant to cover it.
+                // last usage chunk of that stream. The span closes at the newest
+                // usage-or-finish clock so it covers that sample through the
+                // call's recorded outcome, even when the stream runs past the
+                // outer row.
                 let settled_at = if settles_from_stream(&value, event_type) {
                     stream_settled_ms(&value).map_or(timestamp, |ms| ms.max(timestamp))
                 } else {
@@ -631,8 +631,9 @@ fn settles_from_stream(value: &Value, event_type: &str) -> bool {
 /// Latest clock the embedded Assistant stream recorded for a call.
 ///
 /// Only the records that describe the call's outcome count: its usage samples
-/// and its finish. The stream is chronological, so the newest of those is the
-/// clock at which the charged sample was written.
+/// and its finish. The newest of those is the settlement clock. A finish after
+/// the last usage extends the span through the recorded outcome; it does not
+/// supply the charged numbers itself.
 fn stream_settled_ms(value: &Value) -> Option<i64> {
     value
         .pointer("/data/stream")?
