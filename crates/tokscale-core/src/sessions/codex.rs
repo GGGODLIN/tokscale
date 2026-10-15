@@ -5256,8 +5256,10 @@ mod tests {
 
     #[test]
     fn compressed_archive_accepts_aggregate_input_above_simulated_legacy_limit() {
+        const LEGACY_ARCHIVE_LIMIT: u64 = 256 * 1024 * 1024;
         const SIMULATED_LEGACY_LIMIT: u64 = 512;
-        const SIMULATED_CURRENT_LIMIT: u64 = 2048;
+        const LIMIT_SCALE: u64 = LEGACY_ARCHIVE_LIMIT / SIMULATED_LEGACY_LIMIT;
+        let simulated_current_limit = MAX_CODEX_ARCHIVE_BYTES / LIMIT_SCALE;
 
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("above-legacy-limit.jsonl.zst");
@@ -5269,10 +5271,22 @@ mod tests {
             "{COMPRESSED_TURN_CONTEXT}\n{padding_record}\n{padding_record}\n{COMPRESSED_USAGE}\n"
         );
         assert!(content.len() as u64 > SIMULATED_LEGACY_LIMIT);
-        assert!(content.len() as u64 <= SIMULATED_CURRENT_LIMIT);
+        assert!(content.len() as u64 <= simulated_current_limit);
         std::fs::write(&path, zstd::encode_all(content.as_bytes(), 0).unwrap()).unwrap();
 
-        let _limit = register_archive_limit_override(&path, SIMULATED_CURRENT_LIMIT);
+        {
+            let _limit = register_archive_limit_override(&path, SIMULATED_LEGACY_LIMIT);
+            let legacy = parse_codex_file_incremental(&path, 0, CodexParseState::default());
+            assert!(!legacy.parse_succeeded);
+            assert_eq!(
+                legacy.archive_failure.unwrap().cause,
+                CodexArchiveFailureCause::DecodedSizeLimit {
+                    limit_bytes: SIMULATED_LEGACY_LIMIT,
+                }
+            );
+        }
+
+        let _limit = register_archive_limit_override(&path, simulated_current_limit);
         let parsed = parse_codex_file_incremental(&path, 0, CodexParseState::default());
 
         assert!(parsed.parse_succeeded);
