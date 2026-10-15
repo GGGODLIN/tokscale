@@ -1397,7 +1397,9 @@ fn parser_version(client: ClientId) -> u32 {
         // Codex sessions and archives.
         // v14->v15: assign stable cross-copy dedup keys to usage rows that use
         // the file-mtime fallback timestamp, and persist their event ordinal.
-        ClientId::Codex => 15,
+        // v15->v16: retain later usage after safely skipping oversized Codex
+        // JSONL records in large compressed rollouts.
+        ClientId::Codex => 16,
         // v4->v5: jcode's assistant-message timestamp is now back-calculated
         // to the turn start (timestamp - tool_duration_ms) instead of using
         // the recorded (end-anchored) timestamp directly. Follow-up to #890.
@@ -4725,11 +4727,12 @@ mod tests {
         // nickname; v9->v10 retains service_tier for Fast mode pricing,
         // v10->v11 resets duration anchors at standalone task_started events.
         // v11->v13 retains source completeness and gateway activity for empty
-        // results, v13->v14 decodes compressed archives (.jsonl.zst), and
-        // v14->v15 stabilizes fallback-timestamp dedup across rollout copies.
+        // results, v13->v14 decodes compressed archives (.jsonl.zst),
+        // v14->v15 stabilizes fallback-timestamp dedup across rollout copies,
+        // and v15->v16 skips oversized records while preserving later usage.
         // Each bump is what stops an existing cache from replaying the old
         // rows, so it has to be asserted rather than assumed.
-        assert_eq!(parser_version(ClientId::Codex), 15);
+        assert_eq!(parser_version(ClientId::Codex), 16);
         assert_eq!(parser_version(ClientId::Claude), 2);
     }
 

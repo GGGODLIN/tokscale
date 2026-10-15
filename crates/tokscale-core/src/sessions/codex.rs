@@ -12,7 +12,7 @@
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, is_zst_path, parse_timestamp_value,
-    session_id_from_path, MAX_ARCHIVE_BYTES,
+    session_id_from_path,
 };
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
@@ -422,6 +422,11 @@ impl CodexTurnCoverage {
 /// Client id the `codex` parser tags rollouts OpenClaw drove with.
 pub(crate) const OPENCLAW_CLIENT_ID: &str = "openclaw";
 
+// Codex rollouts can include large tool output and image data. This bounds total
+// decoded input separately from the per-record bound below.
+pub(crate) const MAX_CODEX_ARCHIVE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_CODEX_RECORD_BYTES: usize = 16 * 1024 * 1024;
+
 /// Codex thread id from a rollout filename, `rollout-<timestamp>-<uuid>.jsonl`.
 ///
 /// Used where a rollout's ownership comes from its location rather than its
@@ -549,6 +554,9 @@ pub(crate) struct ParsedCodexFile {
     /// read failure.
     pub archive_failure: Option<CodexArchiveFailure>,
     reader_error: Option<(std::io::ErrorKind, String)>,
+    /// Oversized records are consumed without materializing them so later usage
+    /// rows can still be parsed.
+    pub skipped_oversized_records: u64,
     /// True when model-less token_count rows were emitted without a later model.
     pub unresolved_model_events: bool,
     pub state: CodexParseState,
@@ -562,6 +570,8 @@ impl ParsedCodexFile {
 
 #[cfg(test)]
 static ARCHIVE_LIMIT_OVERRIDES: Mutex<Option<HashMap<PathBuf, u64>>> = Mutex::new(None);
+#[cfg(test)]
+static RECORD_LIMIT_OVERRIDES: Mutex<Option<HashMap<PathBuf, usize>>> = Mutex::new(None);
 
 /// Keeps one path-scoped decoded-size limit installed for a test. The exact
 /// path lookup reaches Rayon workers without a process-wide tuning variable.
@@ -619,7 +629,59 @@ fn archive_limit_for_path(_path: &Path) -> u64 {
         return max_bytes;
     }
 
-    MAX_ARCHIVE_BYTES
+    MAX_CODEX_ARCHIVE_BYTES
+}
+
+#[cfg(test)]
+pub(crate) struct RecordLimitOverrideGuard {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for RecordLimitOverrideGuard {
+    fn drop(&mut self) {
+        let Ok(mut overrides) = RECORD_LIMIT_OVERRIDES.lock() else {
+            return;
+        };
+        if let Some(overrides) = overrides.as_mut() {
+            overrides.remove(&self.path);
+        }
+        if matches!(overrides.as_ref(), Some(overrides) if overrides.is_empty()) {
+            *overrides = None;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn register_record_limit_override(
+    path: &Path,
+    max_bytes: usize,
+) -> RecordLimitOverrideGuard {
+    let path = path.to_path_buf();
+    let inserted = {
+        let mut overrides = RECORD_LIMIT_OVERRIDES.lock().unwrap();
+        let overrides = overrides.get_or_insert_with(HashMap::new);
+        overrides.insert(path.clone(), max_bytes).is_none()
+    };
+    assert!(
+        inserted,
+        "a Codex record limit override is already registered for this path"
+    );
+    RecordLimitOverrideGuard { path }
+}
+
+fn record_limit_for_path(_path: &Path) -> usize {
+    #[cfg(test)]
+    if let Some(max_bytes) = RECORD_LIMIT_OVERRIDES
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|overrides| overrides.get(_path).copied())
+    {
+        return max_bytes;
+    }
+
+    MAX_CODEX_RECORD_BYTES
 }
 
 impl CodexParseState {
@@ -693,12 +755,87 @@ struct PendingCodexMessage {
     fallback_dedup: Option<CodexFallbackDedupIdentity>,
 }
 
+enum BoundedJsonlRead {
+    Eof,
+    Line(u64),
+    Oversized(u64),
+}
+
+/// Reads one JSONL record without allowing it to grow `line` beyond `max_bytes`.
+/// An oversized record is consumed through its newline in fixed-size BufRead chunks.
+fn read_bounded_jsonl_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut String,
+    max_bytes: usize,
+) -> std::io::Result<BoundedJsonlRead> {
+    line.clear();
+    let mut consumed = 0_u64;
+    let mut oversized = false;
+    loop {
+        let (take, has_newline) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                return Ok(if consumed == 0 {
+                    BoundedJsonlRead::Eof
+                } else if oversized {
+                    BoundedJsonlRead::Oversized(consumed)
+                } else {
+                    BoundedJsonlRead::Line(consumed)
+                });
+            }
+            let take = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            if !oversized {
+                if line.len().saturating_add(take) > max_bytes {
+                    oversized = true;
+                } else {
+                    let chunk = std::str::from_utf8(&available[..take]).map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                    })?;
+                    line.push_str(chunk);
+                }
+            }
+            (take, take < available.len() || available[take - 1] == b'\n')
+        };
+        reader.consume(take);
+        consumed += take as u64;
+        if has_newline {
+            return Ok(if oversized {
+                BoundedJsonlRead::Oversized(consumed)
+            } else {
+                BoundedJsonlRead::Line(consumed)
+            });
+        }
+    }
+}
+
+#[cfg(test)]
 fn parse_codex_reader<R: BufRead>(
+    reader: R,
+    session_id: &str,
+    fallback_timestamp: i64,
+    start_offset: u64,
+    state: CodexParseState,
+) -> ParsedCodexFile {
+    parse_codex_reader_with_record_limit(
+        reader,
+        session_id,
+        fallback_timestamp,
+        start_offset,
+        state,
+        MAX_CODEX_RECORD_BYTES,
+    )
+}
+
+fn parse_codex_reader_with_record_limit<R: BufRead>(
     mut reader: R,
     session_id: &str,
     fallback_timestamp: i64,
     start_offset: u64,
     mut state: CodexParseState,
+    max_record_bytes: usize,
 ) -> ParsedCodexFile {
     let mut messages = Vec::with_capacity(64);
     let mut fallback_timestamp_indices = Vec::new();
@@ -707,21 +844,26 @@ fn parse_codex_reader<R: BufRead>(
     let mut consumed_offset = start_offset;
     let mut parse_succeeded = true;
     let mut reader_error = None;
+    let mut skipped_oversized_records = 0_u64;
     let mut pending_model_messages = Vec::new();
     let mut unresolved_model_events = false;
 
     loop {
-        line.clear();
-        let bytes_read = match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(bytes_read) => bytes_read,
+        let bytes_read = match read_bounded_jsonl_line(&mut reader, &mut line, max_record_bytes) {
+            Ok(BoundedJsonlRead::Eof) => break,
+            Ok(BoundedJsonlRead::Line(bytes_read)) => bytes_read,
+            Ok(BoundedJsonlRead::Oversized(bytes_read)) => {
+                consumed_offset += bytes_read;
+                skipped_oversized_records += 1;
+                continue;
+            }
             Err(error) => {
                 parse_succeeded = false;
                 reader_error = Some((error.kind(), error.to_string()));
                 break;
             }
         };
-        consumed_offset += bytes_read as u64;
+        consumed_offset += bytes_read;
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1372,6 +1514,7 @@ fn parse_codex_reader<R: BufRead>(
         parse_succeeded,
         archive_failure: None,
         reader_error,
+        skipped_oversized_records,
         unresolved_model_events,
         state,
     }
@@ -1708,6 +1851,7 @@ fn failed_codex_parse(
         parse_succeeded: false,
         archive_failure,
         reader_error: None,
+        skipped_oversized_records: 0,
         unresolved_model_events: false,
         state,
     }
@@ -1749,7 +1893,14 @@ pub(crate) fn parse_codex_file_incremental(
 
         let archive_limit = archive_limit_for_path(path);
         let reader = BufReader::new(decoder.take(archive_limit.saturating_add(1)));
-        let mut parsed = parse_codex_reader(reader, &session_id, fallback_timestamp, 0, state);
+        let mut parsed = parse_codex_reader_with_record_limit(
+            reader,
+            &session_id,
+            fallback_timestamp,
+            0,
+            state,
+            record_limit_for_path(path),
+        );
         parsed.archive_failure = if parsed.consumed_offset > archive_limit {
             Some(CodexArchiveFailure::decoded_size_limit(path, archive_limit))
         } else if let Some((kind, message)) = parsed.reader_error.take() {
@@ -1758,6 +1909,14 @@ pub(crate) fn parse_codex_file_incremental(
         } else {
             None
         };
+        if parsed.skipped_oversized_records > 0 {
+            tracing::warn!(
+                path = %path.display(),
+                max_bytes = record_limit_for_path(path),
+                skipped_records = parsed.skipped_oversized_records,
+                "Skipped oversized Codex JSONL records while retaining later usage"
+            );
+        }
         if parsed.archive_failure.is_some() || !parsed.parse_succeeded {
             parsed.messages.clear();
             parsed.fallback_timestamp_indices.clear();
@@ -1776,7 +1935,14 @@ pub(crate) fn parse_codex_file_incremental(
     }
 
     let reader = BufReader::new(file);
-    parse_codex_reader(reader, &session_id, fallback_timestamp, start_offset, state)
+    parse_codex_reader_with_record_limit(
+        reader,
+        &session_id,
+        fallback_timestamp,
+        start_offset,
+        state,
+        record_limit_for_path(path),
+    )
 }
 
 fn extract_model(payload: &CodexPayload) -> Option<String> {
@@ -2277,11 +2443,18 @@ mod tests {
 
     impl BufRead for FailAfterFirstLine {
         fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            if self.fail_next_read {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "synthetic line decode failure",
+                ));
+            }
             self.inner.fill_buf()
         }
 
         fn consume(&mut self, amt: usize) {
             self.inner.consume(amt);
+            self.fail_next_read |= amt > 0;
         }
 
         fn read_line(&mut self, buf: &mut String) -> std::io::Result<usize> {
@@ -4671,6 +4844,33 @@ mod tests {
         assert!(incremental.parse_succeeded);
         assert!(incremental.archive_failure.is_none());
         assert_eq!(incremental.messages, expected);
+    }
+
+    #[test]
+    fn compressed_archive_skips_oversized_record_and_retains_later_usage() {
+        use std::io::Write as _;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("oversized-record.jsonl.zst");
+        let oversized_record = format!(
+            r#"{{"timestamp":"2026-10-01T00:00:01Z","type":"response_item","payload":{{"type":"function_call_output","output":"{}"}}}}"#,
+            "x".repeat(1024)
+        );
+        let mut encoder =
+            zstd::stream::write::Encoder::new(std::fs::File::create(&path).unwrap(), 0).unwrap();
+        writeln!(encoder, r#"{{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{{"model":"gpt-5"}}}}"#).unwrap();
+        writeln!(encoder, "{oversized_record}").unwrap();
+        writeln!(encoder, r#"{{"timestamp":"2026-10-01T00:00:02Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}},"last_token_usage":{{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}}}}}"#).unwrap();
+        encoder.finish().unwrap();
+
+        let _limit = register_record_limit_override(&path, 512);
+        let parsed = parse_codex_file_incremental(&path, 0, CodexParseState::default());
+
+        assert!(parsed.parse_succeeded);
+        assert!(parsed.archive_failure.is_none());
+        assert_eq!(parsed.skipped_oversized_records, 1);
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].tokens.total(), 160);
     }
 
     #[test]
