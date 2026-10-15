@@ -22,7 +22,9 @@ import {
 import { formatGroupMemberCount } from "@/components/leaderboard/presentation";
 import { formatCurrency, formatNumber } from "@/lib/utils";
 import type { GroupLeaderboardData, GroupLeaderboardUser } from "@/lib/groups/getGroupLeaderboard";
-import type { Period, SortBy } from "@/lib/leaderboard/types";
+import type { SortBy } from "@/lib/leaderboard/types";
+import type { GroupPeriod } from "@/lib/reportingPeriods";
+import { GroupReportingSettings } from "@/components/leaderboard/GroupReportingSettings";
 
 type GroupRole = "owner" | "admin" | "member";
 
@@ -40,6 +42,8 @@ interface GroupDetail {
   description: string | null;
   avatarUrl: string | null;
   isPublic: boolean;
+  timeZone: string;
+  weekStartsOn: number;
   memberCount: number;
   membership: { role: GroupRole } | null;
 }
@@ -479,7 +483,7 @@ export default function GroupDetailClient({
   const router = useRouter();
   const [group, setGroup] = useState(initialGroup);
   const [data, setData] = useState(initialData);
-  const [period, setPeriod] = useState<Period>(initialData.period);
+  const [period, setPeriod] = useState<GroupPeriod>(initialData.period);
   const [sortBy, setSortBy] = useState<SortBy>(initialData.sortBy);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -660,9 +664,11 @@ export default function GroupDetailClient({
           label="Group leaderboard period"
           value={period}
           options={[
-            { value: "all" as Period, label: "All time" },
-            { value: "month" as Period, label: "This month" },
-            { value: "week" as Period, label: "This week" },
+            { value: "all" as GroupPeriod, label: "All time" },
+            { value: "month" as GroupPeriod, label: "This month" },
+            { value: "last-month" as GroupPeriod, label: "Last month" },
+            { value: "week" as GroupPeriod, label: "This week" },
+            { value: "last-week" as GroupPeriod, label: "Last week" },
           ]}
           onChange={(value) => {
             setPeriod(value);
@@ -701,6 +707,11 @@ export default function GroupDetailClient({
           />
         </Actions>
       </Toolbar>
+
+      <Description aria-label="Group reporting period">
+        {data.dateRange ? `${data.dateRange.start} – ${data.dateRange.end}` : "All submitted dates"}
+        {` · ${data.timeZone} · Week starts ${["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][data.weekStartsOn]}`}
+      </Description>
 
       <TableContainer>
         {error ? (
@@ -770,6 +781,14 @@ export default function GroupDetailClient({
         )}
       </TableContainer>
 
+      {canInvite && (
+        <GroupReportingSettings
+          slug={group.slug}
+          timeZone={group.timeZone}
+          weekStartsOn={group.weekStartsOn}
+          onChanged={refreshGroup}
+        />
+      )}
       {canInvite && (
         <InvitePanel>
           <InviteHeading>

@@ -671,7 +671,9 @@ tokscale cursor logout --all
 tokscale cursor logout --all --purge-cache
 ```
 
-By default, Tokscale aggregates usage across all saved Cursor accounts by reading `cursor-cache/usage*.json`. The active account syncs to `usage.json`; additional accounts sync to `usage.<account>.json`. Legacy CSV caches from older Tokscale versions (`usage.csv`, `usage.<account>.csv`) are still read for an account that has no JSON cache yet. The next successful sync of that account writes its JSON cache and moves the CSV to `cursor-cache/archive/`.
+By default, Tokscale aggregates usage across all saved Cursor accounts by reading `cursor-cache/usage*.json`. The active account syncs to `usage.json`; additional accounts use `usage.account-<sha256-of-exact-account-id>.json`. Each new cache records its account owner, so different IDs cannot share cached history or incremental sync progress merely because their sanitized names match.
+
+On the first sync or account change after upgrading, unmarked legacy JSON and CSV caches cannot prove which account owns their history. Tokscale preserves their original bytes and filenames in unique directories under `cursor-cache/archive/`, then fetches each account independently from the beginning. These backups are excluded from reports to avoid attributing ambiguous history to the wrong account. If a fetch fails, the backup remains recoverable; reauthenticate that account and sync again. Offline reports can still read legacy caches until this upgrade step runs. A backup failure stops the sync or account change before any cache is overwritten.
 
 When you log out, Tokscale moves cached usage to `cursor-cache/archive/` so it is no longer aggregated. Use `--purge-cache` to delete cached usage instead.
 
@@ -684,6 +686,8 @@ When you log out, Tokscale moves cached usage to `cursor-cache/archive/` so it i
   }
 }
 ```
+
+When an account has a JSON cache, Cursor sync fetches new usage plus the hour before that account's newest cached event. This bounded overlap refreshes recent billing corrections without downloading the full history on every report. Corrections older than this one-hour window remain as cached; older cached events are preserved, and a first sync without a usable cache still fetches the full history. Each account uses its own cache to determine the window. Only rows accepted by the report parser with positive timestamps no more than five minutes ahead of the sync's start time can set that window or stop pagination; other raw rows are preserved without advancing sync progress. A timed-out delta leaves the cache unchanged so the next sync cannot skip an incomplete interval.
 
 ### Antigravity Commands
 

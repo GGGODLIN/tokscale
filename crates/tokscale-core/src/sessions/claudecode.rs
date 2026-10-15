@@ -747,8 +747,10 @@ fn claude_dedup_index(messages: &[UnifiedMessage]) -> HashMap<String, usize> {
 
 fn claude_message_digest(messages: &[UnifiedMessage]) -> Option<[u8; 32]> {
     let mut hasher = Sha256::new();
+    let mut bytes = Vec::new();
     for message in messages {
-        let bytes = bincode::serialize(message).ok()?;
+        bytes.clear();
+        bincode::serialize_into(&mut bytes, message).ok()?;
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
@@ -4642,6 +4644,24 @@ mod resume_tests {
         let parsed = parse_claude_file_with_checkpoint(&json_path, None);
         assert_eq!(parsed.messages.len(), 2);
         assert!(parsed.checkpoint.is_none());
+    }
+
+    #[test]
+    fn test_reused_message_digest_buffer_preserves_the_wire_digest() {
+        let lines = fixture_lines();
+        let dir = TempDir::new().unwrap();
+        let path = transcript_path(&dir);
+        append(&path, &lines);
+        let messages = parse_claude_file_with_checkpoint(&path, None).messages;
+
+        let mut allocating_hasher = Sha256::new();
+        for message in &messages {
+            let bytes = bincode::serialize(message).unwrap();
+            allocating_hasher.update((bytes.len() as u64).to_le_bytes());
+            allocating_hasher.update(&bytes);
+        }
+        let allocating_digest: [u8; 32] = allocating_hasher.finalize().into();
+        assert_eq!(claude_message_digest(&messages), Some(allocating_digest));
     }
 
     #[test]

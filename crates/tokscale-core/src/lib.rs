@@ -7498,7 +7498,7 @@ mod tests {
         dedupe_latest_trae_messages, filter_messages_for_report,
         generate_graph_with_loaded_pricing, get_home_dir_string, is_generic_routing_label,
         merge_claude_cross_file_duplicate, message_cache, message_passes_report_filter,
-        normalize_model_for_grouping, opencode_json_superseded_by_sqlite,
+        normalize_model_for_grouping, normalize_syntactic, opencode_json_superseded_by_sqlite,
         parse_all_messages_with_pricing_with_cache_policy,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
         parse_local_unified_messages, parse_local_unified_messages_deferred, parsed_to_unified,
@@ -9519,13 +9519,17 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_model_for_grouping_handles_non_ascii_names() {
-        assert_eq!(normalize_model_for_grouping("按需模型"), "按需模型");
-        assert_eq!(
-            normalize_model_for_grouping("按需模型-20241022"),
-            "按需模型"
-        );
-        assert_eq!(normalize_model_for_grouping("-12345678"), "-12345678");
+    fn test_normalize_syntactic_handles_non_ascii_names() {
+        for (input, expected) in [
+            ("按需模型", "按需模型"),
+            ("按需模型-20241022", "按需模型"),
+            ("model-按需", "model-按需"),
+            ("🚀-20241022", "🚀"),
+            ("🚀-１２３４５６７８", "🚀-１２３４５６７８"),
+            ("-12345678", "-12345678"),
+        ] {
+            assert_eq!(normalize_syntactic(input), expected, "input: {input}");
+        }
     }
 
     #[test]
