@@ -3,9 +3,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    ambient_stable_scrollbar, display_width, fit_workspace_label_to_width, format_cache_hit_rate,
-    format_cost, format_tokens, get_compact_client_display_name, prefix_to_width, truncate_text,
-    truncate_to_width, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET, MIDDLE_ELLIPSIS,
+    display_width, fit_workspace_label_to_width_with_marker, format_cache_hit_rate, format_cost,
+    format_tokens, get_compact_client_display_name, prefix_to_width, truncate_text,
+    truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{ProjectUsage, SessionModel};
@@ -192,9 +192,10 @@ impl ProjectColumn {
             // of each of its segments, and cutting the tail leaves the prefix
             // every row shares. Fitted to the width admission resolved for this
             // column, never to the requested width.
-            Self::Project => Cell::from(fit_workspace_label_to_width(
+            Self::Project => Cell::from(fit_workspace_label_to_width_with_marker(
                 &p.label,
                 layout.project_width as usize,
+                app.glyphs.ellipsis,
             ))
             .style(
                 Style::default()
@@ -306,7 +307,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabProjects)),
@@ -343,8 +344,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -454,7 +455,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if projects_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(projects_len, scroll_offset, visible_height);
@@ -493,7 +494,7 @@ fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Ce
         if i > 0 {
             if budget < 3 {
                 spans.push(Span::styled(
-                    MIDDLE_ELLIPSIS,
+                    app.glyphs.ellipsis,
                     Style::default().fg(app.theme.muted),
                 ));
                 break;
@@ -515,7 +516,7 @@ fn build_models_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Ce
         } else {
             let head = prefix_to_width(name, budget - 1);
             spans.push(Span::styled(
-                format!("{head}{MIDDLE_ELLIPSIS}"),
+                format!("{head}{}", app.glyphs.ellipsis),
                 Style::default().fg(color),
             ));
             break;
@@ -543,6 +544,7 @@ mod tests {
     use crate::tui::app::{Tab, TuiConfig};
     use crate::tui::data::TokenBreakdown;
     use crate::tui::ui::header_budget::{assert_header_fits, assert_headers_render_in_full};
+    use crate::tui::ui::widgets::fit_workspace_label_to_width;
     use ratatui::{backend::TestBackend, Terminal};
     use unicode_width::UnicodeWidthStr;
 

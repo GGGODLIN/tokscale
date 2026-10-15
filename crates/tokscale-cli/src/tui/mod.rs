@@ -7,6 +7,7 @@ pub mod config;
 pub mod data;
 mod event;
 mod export;
+pub(crate) mod glyph_probe;
 pub mod i18n;
 mod keymap;
 pub(crate) mod privacy;
@@ -342,6 +343,15 @@ pub fn run(
         return Err(e.into());
     }
 
+    // Forced modes need no capability query. Auto probes only while raw mode
+    // and the alternate screen are active; the probe is erased before the
+    // first frame and degrades to Unknown when DSR is unavailable.
+    let ambient_width = if settings::Settings::load().glyphs == settings::GlyphMode::Auto {
+        glyph_probe::probe_ambient_width(&mut stdout)
+    } else {
+        glyph_probe::AmbientWidth::Unknown
+    };
+
     // From here on the TUI owns raw mode and the alternate screen for its
     // whole run. Background diagnostics (e.g. cache save warnings) must not
     // write raw stdio while this is set, or they corrupt the rendered
@@ -359,13 +369,14 @@ pub fn run(
         }
     };
 
-    let mut app = match App::new_with_cached_data(config, cached_data) {
-        Ok(a) => a,
-        Err(e) => {
-            restore_terminal(&mut terminal);
-            return Err(e);
-        }
-    };
+    let mut app =
+        match App::new_with_cached_data_and_ambient_width(config, cached_data, ambient_width) {
+            Ok(a) => a,
+            Err(e) => {
+                restore_terminal(&mut terminal);
+                return Err(e);
+            }
+        };
 
     // Cache-first load of server-side aggregated multi-device stats. The
     // background refresh (when the cache is stale or missing) is driven by
@@ -695,6 +706,23 @@ mod tests {
             Some(UsageData::default()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn auto_glyphs_follow_the_probe_and_favor_unicode_when_unknown() {
+        for (width, expected_corner) in [
+            (glyph_probe::AmbientWidth::Narrow, "┌"),
+            (glyph_probe::AmbientWidth::Wide, "+"),
+            (glyph_probe::AmbientWidth::Unknown, "┌"),
+        ] {
+            let app = App::new_with_cached_data_and_ambient_width(
+                TuiConfig::default(),
+                Some(UsageData::default()),
+                width,
+            )
+            .unwrap();
+            assert_eq!(app.glyphs.border.top_left, expected_corner);
+        }
     }
 
     #[test]

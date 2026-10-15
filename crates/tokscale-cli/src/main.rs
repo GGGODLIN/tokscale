@@ -14,7 +14,7 @@ mod ui_glyphs;
 mod warp;
 
 use crate::tui::client_ui;
-use crate::ui_glyphs::{AMBIENT_STABLE_SCANNER_ACTIVE, AMBIENT_STABLE_SCANNER_INACTIVE};
+use crate::ui_glyphs::Glyphs;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::io::{self, IsTerminal, Write};
@@ -2110,13 +2110,14 @@ impl LightSpinner {
                 let color = Self::TRAIL_COLORS[distance.min(Self::TRAIL_COLORS.len() - 1)];
                 out.push_str(&format!(
                     "\x1b[38;5;{}m{}\x1b[0m",
-                    color, AMBIENT_STABLE_SCANNER_ACTIVE
+                    color,
+                    Glyphs::ascii_safe().scanner_active
                 ));
             } else {
                 out.push_str(&format!(
                     "\x1b[38;5;{}m{}\x1b[0m",
                     Self::INACTIVE_COLOR,
-                    AMBIENT_STABLE_SCANNER_INACTIVE
+                    Glyphs::ascii_safe().scanner_inactive
                 ));
             }
         }
@@ -9168,22 +9169,22 @@ mod tests {
     #[test]
     fn test_light_spinner_frame_0() {
         let frame = LightSpinner::frame(0);
-        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
-        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_active));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_inactive));
     }
 
     #[test]
     fn test_light_spinner_frame_1() {
         let frame = LightSpinner::frame(1);
-        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
-        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_active));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_inactive));
     }
 
     #[test]
     fn test_light_spinner_frame_2() {
         let frame = LightSpinner::frame(2);
-        assert!(frame.contains(AMBIENT_STABLE_SCANNER_ACTIVE));
-        assert!(frame.contains(AMBIENT_STABLE_SCANNER_INACTIVE));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_active));
+        assert!(frame.contains(Glyphs::ascii_safe().scanner_inactive));
     }
 
     #[test]

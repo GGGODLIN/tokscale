@@ -11,11 +11,9 @@ use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
 use crate::tui::privacy::looks_like_email;
 use crate::tui::ui::widgets::{
     display_width, get_provider_shade, light_ratio_bar_spans, pad_start_to_width, pad_to_width,
-    truncate_ellipsis_to_width as truncate_string, AMBIENT_STABLE_BORDER_SET,
+    truncate_ellipsis_to_width as truncate_string,
 };
-use crate::ui_glyphs::{
-    AMBIENT_STABLE_SEPARATOR as SEPARATOR, AMBIENT_STABLE_SPACED_SEPARATOR as SPACED_SEPARATOR,
-};
+use crate::ui_glyphs::Glyphs;
 
 struct ButtonSpec {
     label: String,
@@ -60,7 +58,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabUsage)),
@@ -102,6 +100,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn status_label(app: &App) -> String {
+    let separator = app.glyphs.separator;
     let lang = app.settings.tui_language;
     if app.is_fetching_usage() {
         return tr(lang, MessageKey::StatusSyncingUsage).to_string();
@@ -139,15 +138,15 @@ fn status_label(app: &App) -> String {
         };
         if app.usage_fetch_diagnostics.is_empty() {
             format!(
-                "{} {SEPARATOR} {}",
+                "{} {separator} {}",
                 providers_str,
-                identity_count_label(lang, inventory.saved, inventory.managed)
+                identity_count_label(lang, inventory.saved, inventory.managed, app.glyphs)
             )
         } else {
             format!(
-                "{} {SEPARATOR} {} {SEPARATOR} {}",
+                "{} {separator} {} {separator} {}",
                 providers_str,
-                identity_count_label(lang, inventory.saved, inventory.managed),
+                identity_count_label(lang, inventory.saved, inventory.managed, app.glyphs),
                 usage_issue_count_label(lang, app.usage_fetch_diagnostics.len())
             )
         }
@@ -171,7 +170,8 @@ fn usage_inventory(outputs: &[UsageOutput]) -> UsageInventory {
     }
 }
 
-fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize) -> String {
+fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize, glyphs: Glyphs) -> String {
+    let separator = glyphs.separator;
     let saved_label = if saved == 1 {
         tr(lang, MessageKey::StatusSavedSingular)
     } else {
@@ -194,7 +194,7 @@ fn identity_count_label(lang: TuiLanguage, saved: usize, managed: usize) -> Stri
         (saved, 0) => format_count(saved, saved_label),
         (0, managed) => format_count(managed, managed_label),
         (saved, managed) => format!(
-            "{} {SEPARATOR} {}",
+            "{} {separator} {}",
             format_count(saved, saved_label),
             format_count(managed, managed_label)
         ),
@@ -929,7 +929,7 @@ fn render_medium_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: &
             .saturating_sub(summary_height)
             .saturating_sub(accounts_table_min_height)
             .max(base_selected_height);
-        medium_selected_account_preferred_height(selected).min(max_dynamic_height)
+        medium_selected_account_preferred_height(selected, app.glyphs).min(max_dynamic_height)
     } else {
         base_selected_height
     }
@@ -948,9 +948,9 @@ fn render_medium_loaded(frame: &mut Frame, app: &mut App, area: Rect, outputs: &
     render_accounts_table(frame, app, chunks[2], outputs);
 }
 
-fn medium_selected_account_preferred_height(selected: &UsageOutput) -> u16 {
+fn medium_selected_account_preferred_height(selected: &UsageOutput, glyphs: Glyphs) -> u16 {
     let status_rows = 3
-        + usize::from(credits_status_line(selected).is_some())
+        + usize::from(credits_status_line(selected, glyphs).is_some())
         + reset_credit_detail_rows(selected);
     let limit_rows = 2 + selected.metrics.len().min(4);
     let action_rows = 3;
@@ -981,7 +981,7 @@ fn render_usage_status(frame: &mut Frame, app: &mut App, area: Rect, outputs: &[
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             tr(lang, MessageKey::TitleUsageSummary),
@@ -1072,6 +1072,7 @@ fn usage_status_summary_lines(
     width: usize,
     height: usize,
 ) -> Vec<Line<'static>> {
+    let separator = app.glyphs.separator;
     let lang = app.settings.tui_language;
     let ready_count = outputs
         .iter()
@@ -1099,7 +1100,7 @@ fn usage_status_summary_lines(
             let score = output_score(output);
             if score > 0.0 {
                 format!(
-                    "{} {SEPARATOR} {:.0}{}",
+                    "{} {separator} {:.0}{}",
                     account_name(app, output),
                     score,
                     tr(lang, MessageKey::UsagePercentLeft)
@@ -1113,13 +1114,13 @@ fn usage_status_summary_lines(
         .unwrap_or_else(|| tr(lang, MessageKey::UsageNoResetData).to_string());
     let action = overall_action(app, outputs);
     let capacity = format!(
-        "{} {SEPARATOR} {} {SEPARATOR} {}{}",
+        "{} {separator} {} {separator} {}{}",
         capacity_count(lang, ready_count, MessageKey::CapacityReady),
         capacity_count(lang, watch_count, MessageKey::CapacityWatch),
         capacity_count(lang, critical_count, MessageKey::CapacityCritical),
         if unknown_count > 0 {
             format!(
-                " {SEPARATOR} {}",
+                " {separator} {}",
                 capacity_count(lang, unknown_count, MessageKey::CapacityUnknown)
             )
         } else {
@@ -1457,6 +1458,7 @@ fn attention_action_rank(output: &UsageOutput) -> u8 {
 }
 
 fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static> {
+    let separator = app.glyphs.separator;
     let status = readiness_status(output);
     let metric = display_metric(output);
     let detail = metric
@@ -1464,7 +1466,7 @@ fn attention_line(app: &App, output: &UsageOutput, width: usize) -> Line<'static
             let reset = metric
                 .resets_at
                 .as_ref()
-                .map(|reset| format!(" {SEPARATOR} {}", helpers::format_reset_time(reset)))
+                .map(|reset| format!(" {separator} {}", helpers::format_reset_time(reset)))
                 .unwrap_or_default();
             format!(
                 "{} {}{}",
@@ -1529,13 +1531,14 @@ fn provider_summary_line(
     group: &UsageProviderGroup<'_>,
     _width: usize,
 ) -> Line<'static> {
+    let separator = app.glyphs.separator;
     let saved = group
         .outputs
         .iter()
         .filter(|(_, output)| output.account.is_some())
         .count();
     let managed = group.outputs.len().saturating_sub(saved);
-    let count_label = identity_count_label(app.settings.tui_language, saved, managed);
+    let count_label = identity_count_label(app.settings.tui_language, saved, managed, app.glyphs);
     let ready = group
         .outputs
         .iter()
@@ -1549,13 +1552,13 @@ fn provider_summary_line(
     let lang = app.settings.tui_language;
     let summary = if risk > 0 {
         format!(
-            "{count_label} {SEPARATOR} {} {SEPARATOR} {}",
+            "{count_label} {separator} {} {separator} {}",
             capacity_count(lang, ready, MessageKey::CapacityReady),
             capacity_count(lang, risk, MessageKey::UsageAtRisk)
         )
     } else {
         format!(
-            "{count_label} {SEPARATOR} {}",
+            "{count_label} {separator} {}",
             capacity_count(lang, ready, MessageKey::CapacityReady)
         )
     };
@@ -1583,7 +1586,7 @@ fn render_selected_account(
     let title = format!(" {}  {} ", title_prefix, output_display_name(app, selected));
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             truncate_string(&title, area.width.saturating_sub(4) as usize),
@@ -1609,7 +1612,7 @@ fn render_selected_account(
             &mut lines,
             app,
             tr(lang, MessageKey::LabelStatus),
-            &selected_status_line(lang, selected),
+            &selected_status_line(lang, selected, app.glyphs),
             Style::default()
                 .fg(readiness_color(app, readiness))
                 .add_modifier(Modifier::BOLD),
@@ -1637,7 +1640,7 @@ fn render_selected_account(
         );
     }
     if lines.len() < detail_limit {
-        if let Some(label) = credits_status_line(selected) {
+        if let Some(label) = credits_status_line(selected, app.glyphs) {
             push_kv_styled(
                 &mut lines,
                 app,
@@ -1836,7 +1839,7 @@ fn append_credit_bank_summary_lines(
         ),
         Span::styled(
             truncate_string(
-                &reset_bank_summary(app.settings.tui_language, outputs),
+                &reset_bank_summary(app.settings.tui_language, outputs, app.glyphs),
                 width.saturating_sub(15),
             ),
             Style::default()
@@ -1979,15 +1982,16 @@ fn format_credit_expiry_label(value: &str) -> String {
         .to_string()
 }
 
-fn selected_status_line(lang: TuiLanguage, output: &UsageOutput) -> String {
+fn selected_status_line(lang: TuiLanguage, output: &UsageOutput, glyphs: Glyphs) -> String {
+    let separator = glyphs.separator;
     let plan = output
         .plan
         .as_deref()
         .unwrap_or_else(|| tr(lang, MessageKey::LabelUnknown));
     format!(
-        "{} {SEPARATOR} {}",
+        "{} {separator} {}",
         plan,
-        account_readiness_label(lang, output, readiness_status(output))
+        account_readiness_label(lang, output, readiness_status(output), glyphs)
     )
 }
 
@@ -2071,17 +2075,20 @@ fn account_readiness_label(
     lang: TuiLanguage,
     output: &UsageOutput,
     readiness: UsageReadiness,
+    glyphs: Glyphs,
 ) -> String {
+    let separator = glyphs.separator;
     let account_state = account_state_label(lang, output);
     let readiness = readiness_label(lang, readiness);
     if account_state.eq_ignore_ascii_case(readiness) {
         readiness.to_string()
     } else {
-        format!("{account_state} {SEPARATOR} {readiness}")
+        format!("{account_state} {separator} {readiness}")
     }
 }
 
 fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'static> {
+    let separator = app.glyphs.separator;
     let ready = outputs
         .iter()
         .filter(|output| readiness_status(output) == UsageReadiness::Ready)
@@ -2093,13 +2100,13 @@ fn snapshot_line(app: &App, outputs: &[UsageOutput], width: usize) -> Line<'stat
     let inventory = usage_inventory(outputs);
     let lang = app.settings.tui_language;
     let summary = format!(
-        "  {}  {} {SEPARATOR} {} {SEPARATOR} {}{}",
+        "  {}  {} {separator} {} {separator} {}{}",
         tr(lang, MessageKey::UsageSnapshot),
         capacity_count(lang, ready, MessageKey::CapacityReady),
         capacity_count(lang, at_risk, MessageKey::UsageAtRisk),
-        identity_count_label(lang, inventory.saved, inventory.managed),
+        identity_count_label(lang, inventory.saved, inventory.managed, app.glyphs),
         if app.hide_usage_emails {
-            format!(" {SEPARATOR} {}", tr(lang, MessageKey::UsageEmailsHidden))
+            format!(" {separator} {}", tr(lang, MessageKey::UsageEmailsHidden))
         } else {
             String::new()
         }
@@ -2174,7 +2181,7 @@ fn render_accounts_table(frame: &mut Frame, app: &mut App, area: Rect, outputs: 
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             tr(lang, MessageKey::TitleAccounts),
@@ -2335,12 +2342,13 @@ fn account_table_widths(width: u16) -> [Constraint; 8] {
 }
 
 fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rect) -> Row<'static> {
+    let separator = app.glyphs.separator;
     let selected = app.selected_index == index;
     let width = area.width as usize;
     let row = usage_row_view(app, output);
     let lang = app.settings.tui_language;
     let state = if width >= 70 {
-        account_readiness_label(lang, output, row.readiness)
+        account_readiness_label(lang, output, row.readiness, app.glyphs)
     } else {
         readiness_label(lang, row.readiness).to_string()
     };
@@ -2390,7 +2398,7 @@ fn narrow_table_row(app: &mut App, output: &UsageOutput, index: usize, area: Rec
     let detail = if row.reset.is_empty() {
         row.limit.clone()
     } else {
-        format!("{} {SEPARATOR} {}", row.limit, row.reset)
+        format!("{} {separator} {}", row.limit, row.reset)
     };
 
     let managed_label = if output.account.is_none() {
@@ -2446,7 +2454,7 @@ fn usage_row_view<'a>(app: &App, output: &'a UsageOutput) -> UsageRowView<'a> {
         .filter(|plan| !plan.is_empty())
         .unwrap_or_else(|| tr(app.settings.tui_language, MessageKey::LabelUnknown))
         .to_string();
-    let limit = metric_summary(app.settings.tui_language, output);
+    let limit = metric_summary(app.settings.tui_language, output, app.glyphs);
     let reset = metric.and_then(display_metric_reset).unwrap_or_default();
     let account_summary = account_plan_label(&account, output.plan.as_deref());
 
@@ -2461,7 +2469,8 @@ fn usage_row_view<'a>(app: &App, output: &'a UsageOutput) -> UsageRowView<'a> {
     }
 }
 
-fn metric_summary(lang: TuiLanguage, output: &UsageOutput) -> String {
+fn metric_summary(lang: TuiLanguage, output: &UsageOutput, glyphs: Glyphs) -> String {
+    let spaced_separator = glyphs.spaced_separator;
     if output.metrics.is_empty() {
         return tr(lang, MessageKey::UsageNoLimits).to_string();
     }
@@ -2475,7 +2484,7 @@ fn metric_summary(lang: TuiLanguage, output: &UsageOutput) -> String {
             format!("{label} {:.0}%", metric.remaining_percent)
         })
         .collect::<Vec<_>>();
-    parts.join(SPACED_SEPARATOR)
+    parts.join(spaced_separator)
 }
 
 fn compact_metric_label(label: &str) -> String {
@@ -2790,10 +2799,11 @@ fn next_reset_label(app: &App, outputs: &[UsageOutput]) -> Option<String> {
 }
 
 fn output_reset_label(app: &App, output: &UsageOutput) -> Option<String> {
+    let separator = app.glyphs.separator;
     let metric = display_metric(output)?;
     let reset = metric.resets_at.as_ref()?;
     Some(format!(
-        "{} {SEPARATOR} {}",
+        "{} {separator} {}",
         truncate_string(&account_name(app, output), 22),
         helpers::format_reset_time(reset)
     ))
@@ -2948,7 +2958,8 @@ fn reset_credit_count_label(lang: TuiLanguage, count: u32) -> String {
     )
 }
 
-fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput]) -> String {
+fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput], glyphs: Glyphs) -> String {
+    let separator = glyphs.separator;
     let available: u32 = outputs
         .iter()
         .filter(|output| output.provider == "Codex")
@@ -2978,12 +2989,13 @@ fn reset_bank_summary(lang: TuiLanguage, outputs: &[UsageOutput]) -> String {
         )
     };
     match nearest_credit_expiry_label(lang, &expiries) {
-        Some(nearest) => format!("{count} {SEPARATOR} {nearest}"),
+        Some(nearest) => format!("{count} {separator} {nearest}"),
         None => count,
     }
 }
 
-fn credits_status_line(output: &UsageOutput) -> Option<String> {
+fn credits_status_line(output: &UsageOutput, glyphs: Glyphs) -> Option<String> {
+    let spaced_separator = glyphs.spaced_separator;
     let mut parts = Vec::new();
     if let Some(credits) = &output.credit_status {
         if let Some(balance) = credits.balance.as_deref() {
@@ -3012,7 +3024,7 @@ fn credits_status_line(output: &UsageOutput) -> Option<String> {
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(SPACED_SEPARATOR))
+        Some(parts.join(spaced_separator))
     }
 }
 
@@ -3041,6 +3053,7 @@ fn quota_bar_spans(
         width,
         Style::default().fg(color),
         app.theme.subtle_text_style(),
+        app.glyphs,
     )
 }
 
@@ -3404,7 +3417,8 @@ mod tests {
             reached: Some(false),
         });
 
-        let label = credits_status_line(&output).expect("missing credit status");
+        let label =
+            credits_status_line(&output, Glyphs::ascii_safe()).expect("missing credit status");
 
         assert!(label.contains("API credits 0"), "{label}");
         assert!(label.contains("no API credits"), "{label}");
@@ -3775,11 +3789,17 @@ mod tests {
 
         assert_eq!(status_label(&app), "2개 공급자 ∙ 1개 저장됨 ∙ 1개 관리됨");
         assert_eq!(
-            identity_count_label(TuiLanguage::Ko, 1, 1),
+            identity_count_label(TuiLanguage::Ko, 1, 1, Glyphs::ascii_safe()),
             "1개 저장됨 ∙ 1개 관리됨"
         );
-        assert_eq!(identity_count_label(TuiLanguage::Ko, 1, 0), "1개 저장됨");
-        assert_eq!(identity_count_label(TuiLanguage::Ko, 0, 2), "2개 관리됨");
+        assert_eq!(
+            identity_count_label(TuiLanguage::Ko, 1, 0, Glyphs::ascii_safe()),
+            "1개 저장됨"
+        );
+        assert_eq!(
+            identity_count_label(TuiLanguage::Ko, 0, 2, Glyphs::ascii_safe()),
+            "2개 관리됨"
+        );
     }
 
     #[test]
@@ -5034,7 +5054,7 @@ mod tests {
                 for output in &app.subscription_usage {
                     let readiness = readiness_status(output);
                     let state = if area_width >= 70 {
-                        account_readiness_label(lang, output, readiness)
+                        account_readiness_label(lang, output, readiness, app.glyphs)
                     } else {
                         readiness_label(lang, readiness).to_string()
                     };

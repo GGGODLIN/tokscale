@@ -395,7 +395,8 @@ where
     Ok(match value.as_ref().and_then(serde_json::Value::as_str) {
         Some("unicode") => GlyphMode::Unicode,
         Some("ascii") => GlyphMode::Ascii,
-        Some("auto") | _ => GlyphMode::Auto,
+        Some("auto") => GlyphMode::Auto,
+        _ => GlyphMode::Auto,
     })
 }
 

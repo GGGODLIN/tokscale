@@ -8,8 +8,8 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::models::model_display_name;
 use super::widgets::{
-    ambient_stable_scrollbar, format_cost, format_cost_per_million, format_ms_per_1k,
-    format_tokens, total_tokens_cell, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    format_cost, format_cost_per_million, format_ms_per_1k, format_tokens, total_tokens_cell,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
@@ -100,7 +100,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             title,
@@ -151,8 +151,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
             .map(|(i, label)| {
                 let indicator = match sort_column(i, is_narrow, is_very_narrow) {
                     Some(field) if field == sort_field => match sort_direction {
-                        SortDirection::Ascending => " ▴",
-                        SortDirection::Descending => " ▾",
+                        SortDirection::Ascending => app.glyphs.sort_up,
+                        SortDirection::Descending => app.glyphs.sort_down,
                     },
                     _ => "",
                 };
@@ -234,7 +234,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     if days_len > visible_height {
         let mut scrollbar_state = viewport_scrollbar_state(days_len, scroll_offset, visible_height);
         frame.render_stateful_widget(
-            ambient_stable_scrollbar(),
+            app.glyphs.scrollbar(),
             area.inner(Margin {
                 horizontal: 0,
                 vertical: 1,

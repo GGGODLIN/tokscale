@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 
 use crate::tui::themes::Theme;
-use crate::ui_glyphs::{AMBIENT_STABLE_SCANNER_ACTIVE, AMBIENT_STABLE_SCANNER_INACTIVE};
+use crate::ui_glyphs::Glyphs;
 
 const WIDTH: usize = 8;
 const HOLD_START: usize = 30;
@@ -50,7 +50,7 @@ pub fn get_scanner_state(frame: usize) -> ScannerState {
     }
 }
 
-pub fn get_scanner_spans(frame: usize, theme: &Theme) -> Vec<Span<'static>> {
+pub fn get_scanner_spans(frame: usize, theme: &Theme, glyphs: Glyphs) -> Vec<Span<'static>> {
     let state = get_scanner_state(frame);
     let mut spans = Vec::with_capacity(WIDTH);
 
@@ -68,9 +68,9 @@ pub fn get_scanner_spans(frame: usize, theme: &Theme) -> Vec<Span<'static>> {
         };
 
         let (symbol, color) = if distance < TRAIL_LENGTH {
-            (AMBIENT_STABLE_SCANNER_ACTIVE, TRAIL_COLORS[distance])
+            (glyphs.scanner_active, TRAIL_COLORS[distance])
         } else {
-            (AMBIENT_STABLE_SCANNER_INACTIVE, INACTIVE_COLOR)
+            (glyphs.scanner_inactive, INACTIVE_COLOR)
         };
 
         spans.push(Span::styled(
@@ -110,7 +110,11 @@ mod tests {
         terminal
             .draw(|frame| {
                 frame.render_widget(
-                    Paragraph::new(Line::from(get_scanner_spans(3, &theme))),
+                    Paragraph::new(Line::from(get_scanner_spans(
+                        3,
+                        &theme,
+                        Glyphs::ascii_safe(),
+                    ))),
                     frame.area(),
                 );
             })

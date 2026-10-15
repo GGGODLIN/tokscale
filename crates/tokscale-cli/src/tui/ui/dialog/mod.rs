@@ -10,6 +10,7 @@ use crossterm::event::{KeyCode, MouseEvent};
 use ratatui::{layout::Rect, Frame};
 
 use crate::tui::themes::Theme;
+use crate::ui_glyphs::Glyphs;
 
 pub use confirm::ConfirmDialog;
 pub use group_by_picker::GroupByPickerDialog;
@@ -35,7 +36,7 @@ pub trait DialogContent {
     fn desired_size(&self, viewport: Rect) -> (u16, u16);
 
     /// Render the dialog content within the given area
-    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme);
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme, glyphs: Glyphs);
 
     /// Handle a key event, return the result
     fn handle_key(&mut self, _key: KeyCode) -> DialogResult {
@@ -70,7 +71,7 @@ mod tests {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| dialog.render(frame, frame.area(), &theme))
+            .draw(|frame| dialog.render(frame, frame.area(), &theme, Glyphs::ascii_safe()))
             .unwrap();
 
         let mut checked_rows = 0;
@@ -91,6 +92,26 @@ mod tests {
         );
     }
 
+    fn assert_unicode_dialog_restores_chrome(name: &str, dialog: &dyn DialogContent) {
+        let width = 60;
+        let theme = Theme::from_name_for_current_terminal(ThemeName::Blue);
+        let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+        terminal
+            .draw(|frame| dialog.render(frame, frame.area(), &theme, Glyphs::unicode()))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("┌"), "{name}: {rendered}");
+        assert!(rendered.contains("●"), "{name}: {rendered}");
+        assert!(rendered.contains("↑↓"), "{name}: {rendered}");
+        assert!(rendered.contains("•"), "{name}: {rendered}");
+    }
+
     #[test]
     fn picker_chrome_has_the_same_width_in_cjk_locales() {
         for lang in TuiLanguage::ALL {
@@ -99,6 +120,10 @@ mod tests {
                 Rc::new(RefCell::new(false)),
             );
             assert_chrome_rows_are_width_stable(
+                &format!("language picker ({})", lang.code()),
+                &language,
+            );
+            assert_unicode_dialog_restores_chrome(
                 &format!("language picker ({})", lang.code()),
                 &language,
             );
@@ -112,6 +137,10 @@ mod tests {
                 &format!("group-by picker ({})", lang.code()),
                 &group_by,
             );
+            assert_unicode_dialog_restores_chrome(
+                &format!("group-by picker ({})", lang.code()),
+                &group_by,
+            );
 
             let clients = ClientPickerDialog::new(
                 Rc::new(RefCell::new(HashSet::from([ClientFilter::Claude]))),
@@ -119,6 +148,10 @@ mod tests {
                 lang,
             );
             assert_chrome_rows_are_width_stable(
+                &format!("client picker ({})", lang.code()),
+                &clients,
+            );
+            assert_unicode_dialog_restores_chrome(
                 &format!("client picker ({})", lang.code()),
                 &clients,
             );

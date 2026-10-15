@@ -4,8 +4,8 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::hourly_profile;
 use super::widgets::{
-    ambient_stable_scrollbar, format_cache_hit_rate, format_cost, format_cost_per_million,
-    format_tokens, total_tokens_cell, viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens, total_tokens_cell,
+    viewport_scrollbar_state,
 };
 use crate::tui::app::{App, HourlyViewMode, SortDirection, SortField};
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
@@ -115,7 +115,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             tr(lang, MessageKey::TitleHourlyUsage),
@@ -170,8 +170,8 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -363,7 +363,7 @@ fn render_table(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if hourly_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(hourly_len, scroll_offset, data_rows_shown);

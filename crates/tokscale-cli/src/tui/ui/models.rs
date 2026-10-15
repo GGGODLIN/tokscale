@@ -2,10 +2,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    ambient_stable_scrollbar, fit_workspace_label_to_width, format_cache_hit_rate, format_cost,
-    format_cost_per_million, format_ms_per_1k, format_tokens, get_client_display_name,
-    get_provider_display_name, total_tokens_cell, truncate_text, truncate_to_width,
-    viewport_scrollbar_state, AMBIENT_STABLE_BORDER_SET,
+    fit_workspace_label_to_width, format_cache_hit_rate, format_cost, format_cost_per_million,
+    format_ms_per_1k, format_tokens, get_client_display_name, get_provider_display_name,
+    total_tokens_cell, truncate_text, truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::i18n::{tr, MessageKey, TuiLanguage};
@@ -238,7 +237,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabModels)),
@@ -285,8 +284,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -459,7 +458,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if models_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(models_len, scroll_offset, visible_height);

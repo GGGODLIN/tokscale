@@ -3,10 +3,9 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 
 use super::widgets::{
-    ambient_stable_scrollbar, display_width, format_cache_hit_rate, format_cost,
-    format_cost_per_million, format_tokens, get_compact_client_display_name, prefix_to_width,
-    total_tokens_cell, truncate_text, truncate_to_width, viewport_scrollbar_state,
-    AMBIENT_STABLE_BORDER_SET, MIDDLE_ELLIPSIS,
+    display_width, format_cache_hit_rate, format_cost, format_cost_per_million, format_tokens,
+    get_compact_client_display_name, prefix_to_width, total_tokens_cell, truncate_text,
+    truncate_to_width, viewport_scrollbar_state,
 };
 use crate::tui::app::{App, SortDirection, SortField};
 use crate::tui::data::{SessionModel, SessionUsage};
@@ -586,7 +585,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.settings.tui_language;
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_set(AMBIENT_STABLE_BORDER_SET)
+        .border_set(app.glyphs.border)
         .border_style(Style::default().fg(app.theme.border))
         .title(Span::styled(
             format!(" {} ", tr(lang, MessageKey::TabSessions)),
@@ -656,8 +655,8 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     let sort_indicator = |field: SortField| -> &'static str {
         if sort_field == field {
             match sort_direction {
-                SortDirection::Ascending => " ▴",
-                SortDirection::Descending => " ▾",
+                SortDirection::Ascending => app.glyphs.sort_up,
+                SortDirection::Descending => app.glyphs.sort_down,
             }
         } else {
             ""
@@ -797,7 +796,7 @@ pub fn render(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(table, inner);
 
     if sessions_len > visible_height {
-        let scrollbar = ambient_stable_scrollbar();
+        let scrollbar = app.glyphs.scrollbar();
 
         let mut scrollbar_state =
             viewport_scrollbar_state(sessions_len, scroll_offset, visible_height);
@@ -857,13 +856,16 @@ fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cel
             spans.push(Span::styled(name.clone(), Style::default().fg(color)));
             budget -= model_len;
         } else if budget <= 1 {
-            spans.push(Span::styled(MIDDLE_ELLIPSIS, Style::default().fg(color)));
+            spans.push(Span::styled(
+                app.glyphs.ellipsis,
+                Style::default().fg(color),
+            ));
             budget = 0;
             ellipsis = true;
         } else {
             let head = prefix_to_width(name, budget - 1);
             spans.push(Span::styled(
-                format!("{head}{MIDDLE_ELLIPSIS}"),
+                format!("{head}{}", app.glyphs.ellipsis),
                 Style::default().fg(color),
             ));
             budget = 0;
@@ -876,7 +878,7 @@ fn build_model_cell(models: &[SessionModel], max_cells: usize, app: &App) -> Cel
     // name already carries its own ellipsis, so only mark the clean-break case.
     if shown < models.len() && !ellipsis {
         spans.push(Span::styled(
-            MIDDLE_ELLIPSIS,
+            app.glyphs.ellipsis,
             Style::default().fg(app.theme.muted),
         ));
     }
@@ -1484,8 +1486,8 @@ mod tests {
                         let arrow = |f: SortField| -> &'static str {
                             match (f == field, direction) {
                                 (false, _) => "",
-                                (true, SortDirection::Ascending) => " ▴",
-                                (true, SortDirection::Descending) => " ▾",
+                                (true, SortDirection::Ascending) => app.glyphs.sort_up,
+                                (true, SortDirection::Descending) => app.glyphs.sort_down,
                             }
                         };
                         // Asked of the renderer's own helpers, never restated
@@ -2226,6 +2228,7 @@ mod tests {
     /// are all held to the same invariant: the frame measures identically in
     /// both ambients.
     fn assert_frame_measures_the_same_in_a_cjk_locale(app: &mut App, width: u16, height: u16) {
+        app.glyphs = crate::ui_glyphs::Glyphs::ascii_safe();
         let frame = render_body(app, width, height);
         for row in frame.lines() {
             assert_eq!(
