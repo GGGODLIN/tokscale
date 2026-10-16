@@ -1576,6 +1576,16 @@ fn devin_cli_additional_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBu
 // Goose CLI uses the native roaming directory; Desktop synthesizes APPDATA
 // from HOME when it is absent. Keep selection independent of the system lookup
 // so both layouts can be tested without fixtures in the real Windows profile.
+//
+// `desktop_home` is deliberately the raw `HOME`/profile value rather than
+// `paths::home_dir()`'s validated redirect: this candidate exists only to
+// mirror what Goose Desktop itself computes (`APPDATA = process.env.APPDATA ||
+// join(process.env.HOME || os.homedir(), 'AppData', 'Roaming')` in
+// `ui/desktop/src/gooseServe.ts`), and Desktop applies no absoluteness check.
+// A POSIX-shaped or drive-relative `HOME` therefore reaches this probe, which
+// `paths::home_dir` would have rejected (#997). That is safe because the only
+// use is a read-only `is_file()` test on a path Goose Desktop would have used:
+// nothing is written, and a non-matching candidate is simply skipped.
 #[cfg(any(target_os = "windows", test))]
 fn discover_goose_windows_db(
     app_data: Option<PathBuf>,
@@ -1590,7 +1600,7 @@ fn discover_goose_windows_db(
     [app_data.or(native_roaming), desktop_roaming]
         .into_iter()
         .flatten()
-        .map(|root| root.join("Block/goose/data/sessions/sessions.db"))
+        .map(|root| join_native_path(&root, "Block/goose/data/sessions/sessions.db"))
         .find(|db| db.is_file())
 }
 
@@ -2625,8 +2635,10 @@ fn scan_all_clients_with_env_strategy_inner(
                 result.goose_db = discover_goose_windows_db(app_data, native_roaming, desktop_home);
             }
             if !use_env_roots && result.goose_db.is_none() {
-                let windows_path = PathBuf::from(home_dir)
-                    .join("AppData/Roaming/Block/goose/data/sessions/sessions.db");
+                let windows_path = join_native_path(
+                    Path::new(home_dir),
+                    "AppData/Roaming/Block/goose/data/sessions/sessions.db",
+                );
                 if windows_path.is_file() {
                     result.goose_db = Some(windows_path);
                 }
@@ -3335,6 +3347,36 @@ mod tests {
             discover_goose_windows_db(None, None, Some(relative_home.clone())),
             Some(relative_home.join("AppData/Roaming/Block/goose/data/sessions/sessions.db")),
             "relative HOME resolves the Desktop database"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[serial]
+    fn test_goose_windows_db_paths_use_native_separators() {
+        // `Path::join` only normalizes the junction, so a `/`-joined relative
+        // literal survives untouched on Windows and yields a mixed-separator
+        // path (#1048). `goose_db` reaches `clients --json` and the canonical
+        // dedup keys, so both Goose Windows joins must be native throughout.
+        let dir = TempDir::new().unwrap();
+        let native = dir.path().join("native");
+        mock_goose_windows_db(&native);
+        let discovered = discover_goose_windows_db(None, Some(native), None)
+            .expect("the native database must be discovered");
+        assert!(
+            !discovered.to_string_lossy().contains('/'),
+            "discovered Windows database must not contain non-native separators: {}",
+            discovered.display()
+        );
+
+        let home = TempDir::new().unwrap();
+        let root = home.path();
+        mock_goose_windows_db(&root.join("AppData/Roaming"));
+        let supplied = scan_goose(root, false).expect("the supplied-home database must be found");
+        assert!(
+            !supplied.to_string_lossy().contains('/'),
+            "supplied-home database must not contain non-native separators: {}",
+            supplied.display()
         );
     }
 
