@@ -1107,6 +1107,23 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // Mistral Vibe: terminal coding agent by Mistral AI.
+    // Logs session metadata and message history under `~/.vibe/logs/session/`
+    // (configurable via VIBE_HOME).
+    Vibe = 57 => {
+        id: "vibe",
+        display: "Mistral Vibe",
+        logo: None,
+        root: PathRoot::EnvVar {
+            var: "VIBE_HOME",
+            fallback_relative: ".vibe",
+        },
+        relative: "logs/session",
+        pattern: "vibe-session",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -1222,7 +1239,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 57);
+        assert_eq!(ClientId::COUNT, 58);
     }
 
     #[test]
@@ -2353,6 +2370,16 @@ mod tests {
         assert_eq!(client.data().pattern, "*.db");
         assert!(client.parse_local());
         assert!(client.submit_default());
+    }
+
+    #[test]
+    fn test_vibe_client_registered_as_local_session_source() {
+        let client = ClientId::from_str("vibe").expect("vibe client should be registered");
+        assert_eq!(client.data().relative_path, "logs/session");
+        assert_eq!(client.data().pattern, "vibe-session");
+        assert!(client.data().parse_local);
+        assert!(client.data().submit_default);
+        assert!(!client.data().headless);
     }
 
     #[test]

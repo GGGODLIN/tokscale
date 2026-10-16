@@ -77,6 +77,10 @@ pub const CLIENT_UI: [ClientUi; ClientId::COUNT] = [
     // from the existing lowercase `i` hotkey for Kiro.
     ClientUi { hotkey: 'I' },
     ClientUi { hotkey: 'V' },
+    // Mistral Vibe: both cases of `v` are taken (Warp holds lowercase, Aside
+    // uppercase) and `m`/`M`, `i`/`I` are too, so `T` takes the next free
+    // letter from "misTral".
+    ClientUi { hotkey: 'T' },
 ];
 
 pub fn display_name(client: ClientId) -> &'static str {

@@ -2389,6 +2389,7 @@ mod tests {
         assert_eq!(clients[54], ClientId::Muse);
         assert_eq!(clients[55], ClientId::AntigravityExtension);
         assert_eq!(clients[56], ClientId::Aside);
+        assert_eq!(clients[57], ClientId::Vibe);
     }
 
     #[test]
@@ -2451,6 +2452,7 @@ mod tests {
             "Muse Code",
             "Antigravity IDE Extension",
             "Aside",
+            "Mistral Vibe",
         ];
 
         assert_eq!(expected.len(), ClientId::COUNT);
@@ -2508,6 +2510,7 @@ mod tests {
             crate::tui::client_ui::hotkey(ClientId::AntigravityExtension),
             'I'
         );
+        assert_eq!(crate::tui::client_ui::hotkey(ClientId::Vibe), 'T');
     }
 
     #[test]
@@ -2631,6 +2634,10 @@ mod tests {
         assert_eq!(
             crate::tui::client_ui::from_hotkey('P'),
             Some(ClientId::PrimeAgent)
+        );
+        assert_eq!(
+            crate::tui::client_ui::from_hotkey('T'),
+            Some(ClientId::Vibe)
         );
     }
 
