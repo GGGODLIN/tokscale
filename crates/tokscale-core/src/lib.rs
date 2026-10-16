@@ -2710,7 +2710,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
         ClientId::Copilot,
         sessions::copilot::parse_copilot_file,
     );
-    all_messages = sessions::copilot::merge_copilot_messages(all_messages);
+    merge_copilot_rows_in_place(&mut all_messages);
     for message in &mut all_messages {
         apply_pricing_if_available(message, pricing);
     }
@@ -5710,6 +5710,30 @@ pub fn calculate_cost_with_service_tier(
         * openai_fast_mode_multiplier(pricing, model_id, provider_id, service_tier)
 }
 
+/// Merge Copilot OTEL snapshots inside a shared lane buffer.
+///
+/// [`sessions::copilot::merge_copilot_messages`] owns a whole vector: it sorts
+/// by its own comparator and merges rows sharing a dedup key. That is only safe
+/// for rows the Copilot lane produced. The streaming tail drains the buffer
+/// right before that lane, so today the buffer holds Copilot rows alone — but
+/// that is an implicit invariant. A future lane that buffers its rows ahead of
+/// Copilot would have them re-ordered by the Copilot comparator, and could see
+/// them merged against a colliding dedup key from another client.
+///
+/// Partition explicitly instead: foreign rows keep their relative order and
+/// pass through untouched, and only `client == "copilot"` rows reach the
+/// merger.
+fn merge_copilot_rows_in_place(messages: &mut Vec<UnifiedMessage>) {
+    let (copilot_rows, foreign_rows): (Vec<UnifiedMessage>, Vec<UnifiedMessage>) = messages
+        .drain(..)
+        .partition(|message| message.client == "copilot");
+    *messages = foreign_rows;
+    if copilot_rows.is_empty() {
+        return;
+    }
+    messages.extend(sessions::copilot::merge_copilot_messages(copilot_rows));
+}
+
 fn apply_pricing_if_available(
     message: &mut UnifiedMessage,
     pricing: Option<&pricing::PricingService>,
@@ -7512,9 +7536,9 @@ mod tests {
         calculate_cost_with_service_tier, dedupe_antigravity_family_messages,
         dedupe_latest_trae_messages, filter_messages_for_report,
         generate_graph_with_loaded_pricing, get_home_dir_string, is_generic_routing_label,
-        merge_claude_cross_file_duplicate, message_cache, message_passes_report_filter,
-        normalize_model_for_grouping, normalize_syntactic, opencode_json_superseded_by_sqlite,
-        parse_all_messages_with_pricing_with_cache_policy,
+        merge_claude_cross_file_duplicate, merge_copilot_rows_in_place, message_cache,
+        message_passes_report_filter, normalize_model_for_grouping, normalize_syntactic,
+        opencode_json_superseded_by_sqlite, parse_all_messages_with_pricing_with_cache_policy,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
         parse_local_unified_messages, parse_local_unified_messages_deferred, parsed_to_unified,
         paths, prepare_submission_pricing, pricing, retain_for_requested_clients, scanner,
@@ -7755,6 +7779,108 @@ mod tests {
         assert_eq!(daily[0].totals.tokens, 146);
         assert_eq!(daily[0].token_breakdown.input, 120);
         assert_eq!(daily[0].token_breakdown.output, 26);
+    }
+
+    #[test]
+    fn copilot_merge_leaves_other_clients_untouched_in_a_shared_buffer() {
+        // The streaming tail drains the buffer right before the Copilot lane,
+        // so in practice only Copilot rows are present. Pin the guarantee
+        // anyway: a lane that later buffers its rows ahead of Copilot must not
+        // have them reordered, merged, or repriced by the Copilot comparator,
+        // even when they collide on a dedup key.
+        let copilot_row = |input: i64, output: i64| {
+            let mut message = UnifiedMessage::new_with_dedup(
+                "copilot",
+                "gpt-4o",
+                "openai",
+                "copilot-session",
+                1_775_934_260_000,
+                TokenBreakdown {
+                    input,
+                    output,
+                    ..Default::default()
+                },
+                0.0,
+                Some("shared-key".to_string()),
+            );
+            message.copilot_context = Some(sessions::copilot::CopilotContextProvenance {
+                model: sessions::copilot::ContextOrigin::Record,
+                session: sessions::copilot::ContextOrigin::Record,
+                agent: sessions::copilot::ContextOrigin::Missing,
+            });
+            message
+        };
+        let foreign_row = |client: &str, session: &str, input: i64| {
+            UnifiedMessage::new_with_dedup(
+                client,
+                "claude-sonnet-4",
+                "anthropic",
+                session,
+                1_775_934_260_000,
+                TokenBreakdown {
+                    input,
+                    ..Default::default()
+                },
+                0.0,
+                Some("shared-key".to_string()),
+            )
+        };
+
+        let mut buffer = vec![
+            foreign_row("claude", "claude-b", 7),
+            copilot_row(1000, 20),
+            foreign_row("claude", "claude-a", 5),
+            copilot_row(1000, 10),
+        ];
+        merge_copilot_rows_in_place(&mut buffer);
+
+        let foreign: Vec<_> = buffer
+            .iter()
+            .filter(|message| message.client != "copilot")
+            .collect();
+        assert_eq!(
+            foreign.len(),
+            2,
+            "same-key rows from another client must not be merged away"
+        );
+        assert_eq!(
+            foreign
+                .iter()
+                .map(|message| message.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-b", "claude-a"],
+            "foreign rows must keep their buffer order"
+        );
+        assert_eq!(foreign[0].tokens.input, 7);
+        assert_eq!(foreign[1].tokens.input, 5);
+
+        let copilot: Vec<_> = buffer
+            .iter()
+            .filter(|message| message.client == "copilot")
+            .collect();
+        assert_eq!(copilot.len(), 1, "the Copilot snapshots still coalesce");
+        assert_eq!(copilot[0].tokens.input, 1000);
+        assert_eq!(copilot[0].tokens.output, 20);
+    }
+
+    #[test]
+    fn copilot_merge_in_place_is_a_no_op_without_copilot_rows() {
+        let row = |session: &str| {
+            UnifiedMessage::new_with_dedup(
+                "claude",
+                "claude-sonnet-4",
+                "anthropic",
+                session,
+                1_775_934_260_000,
+                TokenBreakdown::default(),
+                0.0,
+                Some("shared-key".to_string()),
+            )
+        };
+        let original = vec![row("second"), row("first")];
+        let mut buffer = original.clone();
+        merge_copilot_rows_in_place(&mut buffer);
+        assert_eq!(buffer, original);
     }
 
     #[test]

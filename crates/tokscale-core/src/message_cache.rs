@@ -64,6 +64,32 @@ const COPILOT_CACHE_FORMAT_VERSION: u32 = 12;
 // CACHE_FORMAT_VERSION still loads, without checkpoints. It stays above
 // MICODE_CACHE_FORMAT_VERSION and moves with it.
 const CLAUDE_CACHE_FORMAT_VERSION: u32 = 12;
+// The dispatch order in read_shard_with_limit *is* the compatibility claim, so
+// pin it here rather than leaving it to comments nobody re-reads. Copilot is
+// matched on its namespace first and then demands its own version exactly, so a
+// generic-layout shard must never carry the Copilot envelope's number; MiMo is
+// matched on the version first, so sharing that number would make it reject
+// Claude shards -- and those hold retained history a reparse cannot rebuild.
+const _: () = assert!(
+    COPILOT_CACHE_FORMAT_VERSION > CACHE_FORMAT_VERSION,
+    "a generic-layout shard must read Stale for Copilot, not deserialize as a \
+     Copilot context envelope"
+);
+const _: () = assert!(
+    MICODE_CACHE_FORMAT_VERSION > CACHE_FORMAT_VERSION,
+    "MiMo's envelope is matched by version before the generic layout, so it \
+     must never equal it"
+);
+const _: () = assert!(
+    CLAUDE_CACHE_FORMAT_VERSION > CACHE_FORMAT_VERSION,
+    "Claude's envelope is matched by version before the generic layout, so it \
+     must never equal it"
+);
+const _: () = assert!(
+    MICODE_CACHE_FORMAT_VERSION != CLAUDE_CACHE_FORMAT_VERSION,
+    "MiMo's version branch runs first and rejects every other namespace, so \
+     sharing its number would discard Claude's retained history"
+);
 const LEGACY_CACHE_FORMAT_VERSION_V4: u32 = 4;
 const LEGACY_CACHE_FORMAT_VERSION_V5: u32 = 5;
 const LEGACY_CACHE_FORMAT_VERSION_V6: u32 = 6;
@@ -8111,6 +8137,27 @@ mod tests {
             &HashSet::new(),
         )
         .with_claude_checkpoint(parsed.checkpoint)
+    }
+
+    #[test]
+    fn namespace_envelope_versions_never_collide_with_the_generic_layout() {
+        // Mirrors the const assertions beside the constants: read_shard
+        // dispatches Copilot by namespace and MiMo/Claude by version, so a
+        // generic-layout shard must not carry any namespace envelope's number.
+        for version in [
+            MICODE_CACHE_FORMAT_VERSION,
+            COPILOT_CACHE_FORMAT_VERSION,
+            CLAUDE_CACHE_FORMAT_VERSION,
+        ] {
+            assert_ne!(
+                version, CACHE_FORMAT_VERSION,
+                "a namespace envelope version must never equal the generic one"
+            );
+        }
+        assert_ne!(
+            MICODE_CACHE_FORMAT_VERSION, CLAUDE_CACHE_FORMAT_VERSION,
+            "MiMo's version branch runs first and rejects other namespaces"
+        );
     }
 
     #[test]
