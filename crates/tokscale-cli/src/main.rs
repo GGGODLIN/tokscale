@@ -9585,7 +9585,19 @@ mod tests {
         );
     }
 
+    /// Both payload builders call `discover_mcp_server_names(None)`, which falls
+    /// back to `dirs::home_dir()` and reads the developer's own
+    /// `~/.claude/.mcp.json`. That made the `mcpServers` assertion below depend
+    /// on ambient state: on a machine with configured MCP servers the two
+    /// payloads were compared while a *concurrent* test swapped `HOME` between
+    /// the two calls, so the lists disagreed and the test failed — while
+    /// passing alone and under a clean `HOME`.
+    ///
+    /// `serial_test` plus an isolated `HOME` makes the list empty and stable on
+    /// every machine, which is what the assertion actually wants: the two
+    /// payloads agree, whatever the list is.
     #[test]
+    #[serial_test::serial]
     fn imported_graph_submits_as_backfill_without_device_or_scope() {
         let graph = graph_result_with_contributions(vec![daily_contribution(
             "2026-05-01",
@@ -9594,6 +9606,22 @@ mod tests {
             "claude",
             "claude-opus-4-8",
         )]);
+
+        struct HomeRestore(Option<std::ffi::OsString>);
+        impl Drop for HomeRestore {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(value) => std::env::set_var("HOME", value),
+                        None => std::env::remove_var("HOME"),
+                    }
+                }
+            }
+        }
+
+        let home = tempfile::TempDir::new().unwrap();
+        let _restore = HomeRestore(std::env::var_os("HOME"));
+        unsafe { std::env::set_var("HOME", home.path()) };
 
         let json = serde_json::to_value(backfill_payload(&graph, "ccusage")).unwrap();
         assert_eq!(
@@ -9616,6 +9644,15 @@ mod tests {
             serde_json::to_value(to_ts_token_contribution_data(&graph, None, None)).unwrap();
         assert!(scanned.get("provenance").is_none());
         assert_eq!(json.get("mcpServers"), scanned.get("mcpServers"));
+        // The isolated home configures no MCP servers, so the agreed-on value
+        // is absent rather than whatever this machine happens to have. Asserting
+        // it pins the isolation itself: a future `HOME` leak shows up here
+        // instead of as an intermittent inequality above.
+        assert!(
+            json.get("mcpServers").is_none(),
+            "mcpServers leaked from outside the isolated HOME: {:?}",
+            json.get("mcpServers")
+        );
     }
 
     #[test]
