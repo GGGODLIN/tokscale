@@ -847,13 +847,17 @@ describe("POST /api/submit Antigravity family high-water", () => {
       0,
     );
 
-    // Each case keeps the SEVEN-field total identical to the baseline where it
-    // can, so only the named field regresses and `tokens` alone cannot explain
-    // the freeze.
+    // Each case regresses exactly one field while holding the lifetime token
+    // sum at the baseline, so `tokens` alone cannot explain the freeze. The
+    // derived `tokens` total is itself the sum of the five token fields (see
+    // TOKEN_FIELDS in parserHighWater), so it cannot regress on its own and
+    // needs no case of its own.
     const cases: Array<{ field: string; cell: ReturnType<typeof richCell> }> = [
       { field: "cacheRead", cell: richCell({ cacheRead: 10_000, output: 40_000 }) },
       { field: "reasoning", cell: richCell({ reasoning: 10_000, input: 50_000 }) },
       { field: "cacheWrite", cell: richCell({ cacheWrite: 0, input: 50_000 }) },
+      { field: "input", cell: richCell({ input: 30_000, output: 40_000 }) },
+      { field: "output", cell: richCell({ output: 20_000, input: 50_000 }) },
       { field: "messages", cell: richCell({ messages: 4 }) },
     ];
 
@@ -884,12 +888,21 @@ describe("POST /api/submit Antigravity family high-water", () => {
       expect(stored?.messages, `${field} deficit must not reduce messages`).toBe(
         baselineCell.messages,
       );
-      expect(stored?.cacheRead, `${field} deficit must not reduce cacheRead`).toBe(
-        baselineCell.tokens.cacheRead,
-      );
-      expect(stored?.reasoning, `${field} deficit must not reduce reasoning`).toBe(
-        baselineCell.tokens.reasoning,
-      );
+      // Assert EVERY token field, not just the one this case regressed: a
+      // comparator that drops a single field from COVERAGE_FIELDS must fail
+      // here rather than passing because no assertion happened to watch it.
+      for (const tokenField of [
+        "input",
+        "output",
+        "cacheRead",
+        "cacheWrite",
+        "reasoning",
+      ] as const) {
+        expect(
+          stored?.[tokenField],
+          `${field} deficit must not reduce ${tokenField}`,
+        ).toBe(baselineCell.tokens[tokenField]);
+      }
     }
   });
 
