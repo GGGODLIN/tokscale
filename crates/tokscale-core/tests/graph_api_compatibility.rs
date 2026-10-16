@@ -2,33 +2,36 @@
 use std::collections::BTreeSet;
 use tokscale_core::*;
 
+/// Build the fixture through the public constructor rather than an exhaustive
+/// struct literal.
+///
+/// `original_public_struct_literals_and_function_signatures_still_compile`
+/// below is the test that deliberately pins the *aggregate* layouts, because
+/// breaking those is the regression this file exists to catch. `UnifiedMessage`
+/// is different: it is a parser-facing type that legitimately grows fields as
+/// clients are added (`copilot_context` in #1434 is one), and an exhaustive
+/// literal here only made every such addition fail this test for a reason
+/// unrelated to graph API compatibility.
 fn legacy_message() -> UnifiedMessage {
-    UnifiedMessage {
-        client: "test".into(),
-        model_id: "model".into(),
-        provider_id: "provider".into(),
-        session_id: "session".into(),
-        workspace_key: None,
-        workspace_label: None,
-        timestamp: 0,
-        date: "2024-01-01".into(),
-        tokens: TokenBreakdown {
+    let mut message = UnifiedMessage::new(
+        "test",
+        "model",
+        "provider",
+        "session",
+        0,
+        TokenBreakdown {
             input: 100,
             ..Default::default()
         },
-        cost: 1.0,
-        cost_source: CostSource::ProviderReported,
-        service_tier: None,
-        duration_ms: None,
-        message_count: 1,
-        agent: None,
-        dedup_key: None,
-        session_title: None,
-        parent_session_id: None,
-        is_turn_start: false,
-        model_attribution_conflicted: false,
-        copilot_context: None,
-    }
+        1.0,
+    );
+    // `new` derives the date from the timestamp; pin it so the assertions below
+    // do not depend on the local timezone of the machine running the test.
+    message.date = "2024-01-01".into();
+    message.mark_provider_reported_cost();
+    assert_eq!(message.cost_source, CostSource::ProviderReported);
+    assert_eq!(message.message_count, 1);
+    message
 }
 
 #[test]
