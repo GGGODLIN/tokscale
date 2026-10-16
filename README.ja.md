@@ -1517,7 +1517,7 @@ AIコーディングツールはクロスプラットフォームの場所にセ
 | Codebuff | `~/.config/manicode/projects/` (+ `manicode-dev`、`manicode-staging`) | `%USERPROFILE%\.config\manicode\projects\` | `CODEBUFF_DATA_DIR` 環境変数でオーバーライド |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | OpenCodeと同様に`xdg-basedir`を使用 |
 | Crush | `$XDG_DATA_HOME/crush/`（フォールバック: `~/.local/share/crush/`） | `%USERPROFILE%\.local\share\crush\`（設定されていれば `%XDG_DATA_HOME%\crush\`） | フォールバック付きでXDGデータディレクトリを使用 |
-| Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support、レガシー Block パス) | `%APPDATA%\Block\goose\data\sessions` | `GOOSE_PATH_ROOT` 環境変数で設定可能 |
+| Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support、レガシー Block パス) | `%APPDATA%\Block\goose\data\sessions`（フォールバック: `%USERPROFILE%\.local\share\goose\sessions\` とレガシー `Block` パス） | `GOOSE_PATH_ROOT` 環境変数で設定可能 |
 | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync` は現在 macOS / Linux でのみサポート |
 | Antigravity CLI | `~/.gemini/antigravity-cli/conversations/` | `%USERPROFILE%\.gemini\antigravity-cli\conversations\` | `GEMINI_CLI_HOME` 環境変数で設定可能 |
 | Antigravity IDE Extension | `~/.gemini/antigravity/conversations/` | `%USERPROFILE%\.gemini\antigravity\conversations\` | すべてのプラットフォームで同じパス |

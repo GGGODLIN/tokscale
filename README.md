@@ -1561,7 +1561,7 @@ AI coding tools store their session data in cross-platform locations. Most tools
 | Codebuff | `~/.config/manicode/projects/` (+ `manicode-dev`, `manicode-staging`) | `%USERPROFILE%\.config\manicode\projects\` | Override via `CODEBUFF_DATA_DIR` env var |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | Uses `xdg-basedir` like OpenCode |
 | Crush | `$XDG_DATA_HOME/crush/` (fallback: `~/.local/share/crush/`) | `%USERPROFILE%\.local\share\crush\` (or `%XDG_DATA_HOME%\crush\` if set) | Uses XDG data directory with fallback |
-| Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support, legacy Block paths) | `%APPDATA%\Block\goose\data\sessions` | Configurable via `GOOSE_PATH_ROOT` env var |
+| Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support, legacy Block paths) | `%APPDATA%\Block\goose\data\sessions` (fallback: `%USERPROFILE%\.local\share\goose\sessions\` and the legacy `Block` paths) | Configurable via `GOOSE_PATH_ROOT` env var |
 | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync` is currently supported on macOS/Linux only |
 | Antigravity CLI | `~/.gemini/antigravity-cli/conversations/` | `%USERPROFILE%\.gemini\antigravity-cli\conversations\` | Configurable via `GEMINI_CLI_HOME` env var |
 | Antigravity IDE Extension | `~/.gemini/antigravity/conversations/` | `%USERPROFILE%\.gemini\antigravity\conversations\` | Same path on all platforms |

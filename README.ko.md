@@ -1518,7 +1518,7 @@ AI 코딩 도구들은 크로스 플랫폼 위치에 세션 데이터를 저장�
 | Codebuff | `~/.config/manicode/projects/` (+ `manicode-dev`, `manicode-staging`) | `%USERPROFILE%\.config\manicode\projects\` | `CODEBUFF_DATA_DIR` 환경변수로 오버라이드 |
 | Kilo CLI | `~/.local/share/kilo/` | `%USERPROFILE%\.local\share\kilo\` | OpenCode와 같이 `xdg-basedir` 사용 |
 | Crush | `$XDG_DATA_HOME/crush/` (기본값: `~/.local/share/crush/`) | `%USERPROFILE%\.local\share\crush\` (설정된 경우 `%XDG_DATA_HOME%\crush\`) | 기본 경로를 포함한 XDG 데이터 디렉토리 사용 |
-| Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support, 레거시 Block 경로) | `%APPDATA%\Block\goose\data\sessions` | `GOOSE_PATH_ROOT` 환경변수로 설정 가능 |
+| Goose | `~/.local/share/goose/sessions/` (+ macOS Application Support, 레거시 Block 경로) | `%APPDATA%\Block\goose\data\sessions` (폴백: `%USERPROFILE%\.local\share\goose\sessions\` 및 레거시 `Block` 경로) | `GOOSE_PATH_ROOT` 환경변수로 설정 가능 |
 | Antigravity | `~/.config/tokscale/antigravity-cache/sessions/` | — | `tokscale antigravity sync`는 현재 macOS/Linux에서만 지원 |
 | Zed Agent | `~/.local/share/zed/threads/threads.db` | `%LOCALAPPDATA%\Zed\threads\threads.db` | 호스팅된 Zed 모델 사용량 전용; 외부 ACP 에이전트는 포함되지 않음 |
 | Kiro | `~/.kiro/sessions/cli/` 및 `~/.local/share/kiro-cli/data.sqlite3` | `%USERPROFILE%\.kiro\sessions\cli\` 및 `%USERPROFILE%\.local\share\kiro-cli\data.sqlite3` | Kiro 세션 파일과 함께 존재하는 경우 Kiro CLI SQLite 데이터베이스를 파싱 |
