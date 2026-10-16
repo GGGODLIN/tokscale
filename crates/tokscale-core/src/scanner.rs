@@ -436,6 +436,26 @@ fn is_openclaw_compaction_checkpoint(file_name: &str) -> bool {
     !session_id.is_empty() && is_uuid(checkpoint_id)
 }
 
+/// Discover `<account>/sessions/<session>/messages.jsonl` under `~/.aside/u`.
+///
+/// Deliberately NOT `scan_directory`, and not expressible as a pattern there,
+/// for two reasons that are both load-bearing:
+///
+/// 1. `scan_directory` admits a symlinked file (`file_type.is_symlink() &&
+///    path.is_file()`) and walks with `WalkDir`'s default link-following off
+///    only for directories it has already entered. An Aside account tree sits
+///    beside `memory/`, `password-manager/`, `accounts.json` and per-site
+///    caches, so a transcript-shaped symlink is enough to read a credential
+///    file through the scanner. `symlink_metadata` refuses the link itself,
+///    which is why the checks below never follow one — see
+///    `aside_discovery_does_not_follow_account_or_transcript_symlinks`.
+/// 2. The layout has to be pinned at every level, not just by filename. A
+///    session's sibling `artifacts/` and `tmp/` directories hold downloads and
+///    screenshots, and only the exact
+///    `<account>/sessions/<session>/messages.jsonl` depth carries usage.
+///
+/// `ClientId::Aside`'s declared `pattern` is therefore inert: this function
+/// ignores it, and the generic walker is never asked for this client.
 fn scan_aside_accounts(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let Ok(accounts) = std::fs::read_dir(root) else {
@@ -3009,6 +3029,9 @@ fn scan_all_clients_with_env_strategy_inner(
         tasks
             .into_par_iter()
             .map(|(client_id, path, pattern)| {
+                // Aside needs a layout- and symlink-aware walk that no
+                // `scan_directory` pattern can express; see
+                // `scan_aside_accounts` for why its declared pattern is inert.
                 let files = if client_id == ClientId::Aside {
                     scan_aside_accounts(Path::new(&path))
                 } else {

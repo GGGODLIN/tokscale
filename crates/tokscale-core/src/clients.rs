@@ -1099,6 +1099,10 @@ define_clients!(
         logo: Some("https://raw.githubusercontent.com/junhoyeo/tokscale/main/.github/assets/client-aside.png"),
         root: PathRoot::Home,
         relative: ".aside/u",
+        // Documentation only: `scanner::scan_aside_accounts` owns this
+        // client's discovery and ignores the pattern, because the generic
+        // walker would both follow a transcript-shaped symlink out of the
+        // account tree and admit `messages.jsonl` at the wrong depth.
         pattern: "messages.jsonl",
         headless: false,
         parse_local: true,

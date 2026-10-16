@@ -664,3 +664,87 @@ async fn aside_one_hour_cache_writes_survive_every_lane() {
     assert_eq!(legacy.messages[0].cache_write_1h, 40);
     assert_eq!(legacy.messages[0].provider_id, "anthropic");
 }
+
+/// The depth half of what `scan_aside_accounts` guarantees, stated so a
+/// refactor onto the generic walker fails here instead of silently widening
+/// what Aside discovery can read. `scan_directory` matches on filename without
+/// pinning the depth, so each of these would be admitted by it.
+///
+/// Complements `aside_discovers_only_session_transcripts`, which covers the
+/// session's siblings; this one covers the wrong depths inside and above a
+/// session, including one below it.
+#[test]
+fn aside_discovery_pins_the_transcript_depth() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".aside/u");
+
+    let real = root.join("0/sessions/2026-09-05_real/messages.jsonl");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, "{}\n").unwrap();
+
+    // Correctly named transcripts at every wrong depth: too shallow, too deep,
+    // and in the sibling directories a session really does have.
+    for wrong in [
+        "0/messages.jsonl",
+        "0/sessions/messages.jsonl",
+        "0/sessions/2026-09-05_real/artifacts/messages.jsonl",
+        "0/sessions/2026-09-05_real/tmp/messages.jsonl",
+        "0/sessions/2026-09-05_real/nested/deeper/messages.jsonl",
+        "0/memory/projects/messages.jsonl",
+    ] {
+        let path = root.join(wrong);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{}\n").unwrap();
+    }
+
+    let scan =
+        scan_all_clients_with_env_strategy(home.path().to_str().unwrap(), &["aside".into()], false);
+
+    let found: Vec<_> = scan.all_files().into_iter().map(|(_, path)| path).collect();
+    assert_eq!(
+        found,
+        vec![real],
+        "only `<account>/sessions/<session>/messages.jsonl` may be discovered"
+    );
+}
+
+/// The symlink half: a transcript-shaped alias must not read a file outside the
+/// session tree. `scan_directory` accepts a symlink whose target is a file, and
+/// an Aside account tree sits beside `memory/`, `password-manager/` and
+/// `accounts.json`, so this is the property that makes the custom walk
+/// necessary rather than merely tidy.
+///
+/// Unix-only for the same reason as
+/// `aside_discovery_does_not_follow_account_or_transcript_symlinks`: creating a
+/// symlink on Windows needs a privilege CI does not grant, and
+/// `std::os::unix::fs::symlink` does not exist there.
+#[cfg(unix)]
+#[test]
+fn aside_discovery_refuses_symlinked_transcripts() {
+    use std::os::unix::fs::symlink;
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".aside/u");
+
+    let real = root.join("0/sessions/2026-09-05_real/messages.jsonl");
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    std::fs::write(&real, "{}\n").unwrap();
+
+    // A credential-shaped file outside the session tree, aliased into it under
+    // the transcript's own name.
+    let secret = home.path().join("private/accounts.json");
+    std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+    std::fs::write(&secret, "{}\n").unwrap();
+    let aliased = root.join("0/sessions/2026-09-06_alias");
+    std::fs::create_dir_all(&aliased).unwrap();
+    symlink(&secret, aliased.join("messages.jsonl")).unwrap();
+
+    let scan =
+        scan_all_clients_with_env_strategy(home.path().to_str().unwrap(), &["aside".into()], false);
+
+    let found: Vec<_> = scan.all_files().into_iter().map(|(_, path)| path).collect();
+    assert_eq!(
+        found,
+        vec![real],
+        "a symlinked transcript must not be discovered"
+    );
+}
