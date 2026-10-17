@@ -178,6 +178,29 @@ function expandDaysForReplaceLayouts(
   return layoutOnlyDates;
 }
 
+/**
+ * A recount proof may describe a day the submission does not date at all:
+ * every row the previous generation counted there was a duplicate the
+ * corrected generation drops. Such a day joins the write set as an empty day
+ * so the stored cell can be corrected; nothing else on it is resubmitted.
+ */
+function expandDaysForRecountProofs(
+  daysToProcess: Map<string, SubmissionData["contributions"][number]>,
+  parserPlans: Map<string, ParserHighWaterPlan>,
+  existingDates: ReadonlySet<string>
+): Set<string> {
+  const proofOnlyDates = new Set<string>();
+  for (const [, plan] of parserPlans) {
+    for (const date of plan.recountDays ?? []) {
+      if (!daysToProcess.has(date) && existingDates.has(date)) {
+        daysToProcess.set(date, emptyLayoutDay(date));
+        proofOnlyDates.add(date);
+      }
+    }
+  }
+  return proofOnlyDates;
+}
+
 function mergeModelBreakdowns(
   target: Record<string, ClientBreakdownData["models"][string]>,
   incoming: Record<string, ClientBreakdownData["models"][string]>
@@ -1000,6 +1023,13 @@ export async function POST(request: Request) {
         parserPlans,
         existingDeviceDays
       );
+      for (const date of expandDaysForRecountProofs(
+        daysToProcess,
+        parserPlans,
+        new Set(existingDeviceDays.map((day) => day.date))
+      )) {
+        layoutOnlyDates.add(date);
+      }
 
       // ------------------------------------------
       // STEP 3c: Compute merge results in memory, then batch write
@@ -1110,6 +1140,8 @@ export async function POST(request: Request) {
           // after the merge: it is lower than the stored one by design, which
           // the regression guard would otherwise refuse.
           const recountedCells = new Map<string, ClientBreakdownData>();
+          const incomingCostIsComplete =
+            incomingDay.totals?.costIsComplete ?? true;
           for (const [client, plan] of plannedIncrementClients) {
             const stored = ownValue(existingClientBreakdown, client);
             const proofDay = ownValue(
@@ -1133,7 +1165,11 @@ export async function POST(request: Request) {
             );
             clientsToMerge.delete(client);
             delete incomingClientBreakdown[client];
-            if (removed.tokens > 0 || removed.cost > 0 || removed.messages > 0) {
+            // An incomplete snapshot may not lower cost (the write below
+            // floors it at the stored model costs), so only a complete one
+            // actually removes the proven cost; report what is written.
+            const removedCost = incomingCostIsComplete ? removed.cost : 0;
+            if (removed.tokens > 0 || removedCost > 0 || removed.messages > 0) {
               const total = recountRemoved.get(client) ?? {
                 days: 0,
                 tokens: 0,
@@ -1141,7 +1177,7 @@ export async function POST(request: Request) {
               };
               total.days += 1;
               total.tokens += removed.tokens;
-              total.cost += removed.cost;
+              total.cost += removedCost;
               recountRemoved.set(client, total);
             }
           }
@@ -1174,8 +1210,6 @@ export async function POST(request: Request) {
             );
           }
           const mergedClientBreakdown = mergeResult.merged;
-          const incomingCostIsComplete =
-            incomingDay.totals?.costIsComplete ?? true;
           for (const [client, cell] of recountedCells) {
             // The proof restates the whole cell's cost, so a complete snapshot
             // clears an earlier floor exactly, the documented rule for a
@@ -1183,11 +1217,19 @@ export async function POST(request: Request) {
             // the stored (pre-correction) model costs stay as floors and the
             // cell stays tagged, and the cost correction lands on the first
             // complete snapshot of the same layout.
-            mergedClientBreakdown[client] = applyCostCompleteness(
+            const written = applyCostCompleteness(
               cell,
               ownValue(existingClientBreakdown, client),
               incomingCostIsComplete
             );
+            // A cell the proof empties entirely (every stored row was a
+            // duplicate) leaves nothing to keep; dropping it lets an
+            // otherwise empty day row go with it below.
+            if (written.tokens === 0 && written.messages === 0 && written.cost === 0) {
+              delete mergedClientBreakdown[client];
+            } else {
+              mergedClientBreakdown[client] = written;
+            }
           }
           for (const [client] of plannedIncrementClients) {
             const merged = mergedClientBreakdown[client];

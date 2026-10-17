@@ -506,16 +506,24 @@ function proofCellIsOrdered(entry: RecountProofEntry): boolean {
  * by token field and in message count, for every model either side names.
  * That is what ties the proof to "the same bytes": a proof for rows the
  * snapshot does not contain, or a snapshot with rows the proof never saw,
- * fails here and is ignored for the day. Cost is deliberately not compared:
- * submission zeroes cost it cannot price authoritatively, and the day's
- * completeness tag already governs how cost is floored.
+ * fails here and is ignored for the day. A day the snapshot does not date at
+ * all is an empty cell: the proof may describe it only as rows the corrected
+ * generation drops entirely.
+ *
+ * Cost is tied one-sidedly. Submission zeroes cost it cannot price
+ * authoritatively AFTER the proof is built, so the submitted cell may carry
+ * less cost than the proof's corrected side, never more. A proof whose
+ * corrected cost sits below the snapshot would let the correction floor
+ * stored spend under what this very scan reports, so it is refused.
  */
 export function recountProofDayMatchesSnapshot(
   proofDay: Record<string, RecountProofEntry> | undefined,
   incoming: ClientBreakdownData | undefined
 ): boolean {
-  if (!proofDay || !incoming) return false;
-  const incomingModels = modelsForHighWater(incoming);
+  if (!proofDay) return false;
+  const incomingModels = incoming
+    ? modelsForHighWater(incoming)
+    : createSafeRecord<ModelBreakdownData>();
   const modelIds = new Set([
     ...Object.keys(proofDay),
     ...Object.keys(incomingModels),
@@ -523,13 +531,14 @@ export function recountProofDayMatchesSnapshot(
   if (modelIds.size === 0) return false;
   for (const modelId of modelIds) {
     const entry = ownValue(proofDay, modelId);
-    const model = ownValue(incomingModels, modelId);
-    if (!entry || !model || !proofCellIsOrdered(entry)) return false;
+    const model = ownValue(incomingModels, modelId) ?? emptyModel();
+    if (!entry || !proofCellIsOrdered(entry)) return false;
     if (
       PROOF_TOKEN_FIELDS.some(
         (field) => entry.corrected.tokens[field] !== model[field]
       ) ||
-      entry.corrected.messages !== model.messages
+      entry.corrected.messages !== model.messages ||
+      model.cost - entry.corrected.cost > PROOF_COST_TOLERANCE
     ) {
       return false;
     }
@@ -681,6 +690,13 @@ function stateAfterCreditedIncrements(
 }
 
 const COST_SCALE = 10_000;
+
+/**
+ * Submitted and proof costs are sums of the same per-message prices, so they
+ * agree to floating-point noise; this is the slack allowed before a cost is
+ * treated as a different number (one unit of the stored cost scale).
+ */
+const PROOF_COST_TOLERANCE = 1 / COST_SCALE;
 
 function quantizeCost(value: number): number {
   return Math.round((positive(value) + Number.EPSILON) * COST_SCALE) / COST_SCALE;
@@ -1092,18 +1108,20 @@ export function planParserHighWaterSubmission(args: {
         incomingDays: args.incomingDays,
       });
       if (followed) return followed;
-
-      // A default all-client scan declares every default parser, including
-      // clients that produced no rows. For a client whose generation only
-      // ever heals through proof, an empty snapshot is not evidence that the
-      // parser read anything, so keep the transition pending rather than
-      // baselining the inflated legacy rows as this generation's ledger.
-      if (
-        RECOUNT_PROOF_CLIENTS.has(args.client) &&
-        Object.keys(args.incomingDays).length === 0
-      ) {
-        return pendingTransitionPlan(args.incomingVersion);
-      }
+    }
+    // A default all-client scan declares every default parser, including
+    // clients that produced no rows. For a client whose generation only ever
+    // heals through proof, an empty snapshot is not evidence that the parser
+    // read anything, so keep the transition pending rather than baselining
+    // the inflated legacy rows as this generation's ledger. With nothing
+    // stored the same applies: a failed first read must not consume the
+    // transition and freeze the generation-1 submits this device may still
+    // make.
+    if (
+      RECOUNT_PROOF_CLIENTS.has(args.client) &&
+      Object.keys(args.incomingDays).length === 0
+    ) {
+      return pendingTransitionPlan(args.incomingVersion);
     }
     // At transition, preserving all legacy rows and crediting at most positive
     // lifetime aggregate growth is non-destructive. With deleted old usage D

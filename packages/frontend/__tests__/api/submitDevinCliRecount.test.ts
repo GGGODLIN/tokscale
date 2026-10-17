@@ -454,13 +454,30 @@ function proofCell(tokens: number, cost: number, messages: number) {
 
 function submissionBody(
   days: BodyDay[],
-  options: { version?: number; fullHistory?: boolean; costIsComplete?: boolean } = {},
+  options: {
+    version?: number;
+    fullHistory?: boolean;
+    costIsComplete?: boolean;
+    /**
+     * Proof days the body does not date at all: generation 1 counted rows
+     * there that generation 2 drops entirely, so the corrected side is empty.
+     */
+    allDuplicateDays?: Array<{ date: string; previous: { tokens: number; cost?: number; messages?: number } }>;
+  } = {},
 ) {
   const version = options.version ?? SUPPORTED_VERSIONED_PARSERS["devin-cli"];
   const dates = days.map((day) => day.date).sort();
   const dayCost = (day: BodyDay) => day.cost ?? day.tokens / 1000;
   const proofDays = Object.fromEntries(
-    days
+    [
+      ...(options.allDuplicateDays ?? []).map((day) => ({
+        date: day.date,
+        tokens: 0,
+        previous: day.previous,
+        provenCorrected: { tokens: 0, cost: 0, messages: 0 },
+      })),
+      ...days,
+    ]
       .filter((day) => day.previous)
       .map((day) => {
         const corrected = day.provenCorrected ?? { tokens: day.tokens, cost: dayCost(day), messages: 1 };
@@ -823,13 +840,20 @@ describe("POST /api/submit devin-cli recount proof", () => {
       { date: "2026-10-08", tokens: 1_200, cost: 8, previous: { tokens: 3_000, cost: 30 } },
     ];
 
-    await submit(store, submissionBody(corrected, { costIsComplete: false }));
+    const first = await submit(store, submissionBody(corrected, { costIsComplete: false }));
 
     // Tokens are corrected; the incomplete snapshot may not lower the stored
     // cost, so each covered cell keeps its stored cost as a floor and is
     // tagged, while the uncovered day is untouched.
     expect(storedTokens(store)).toBe(1_000 + 900 + 1_200);
     expect(storedCost(store)).toBeCloseTo(60, 4);
+    // The response reports what was written, not what the proof would have
+    // allowed: the floored cost was not removed.
+    expect(
+      first.warnings?.some((warning: string) =>
+        warning.includes("removed 2,900 tokens and $0.0000"),
+      ),
+    ).toBe(true);
     for (const date of ["2026-10-07", "2026-10-08"]) {
       const cell = store.days.find((day) => day.date === date)!.sourceBreakdown["devin-cli"];
       expect(cell.provenance?.costIsComplete).toBe(false);
@@ -850,5 +874,63 @@ describe("POST /api/submit devin-cli recount proof", () => {
     }
     const day8 = store.days.find((day) => day.date === "2026-10-08")!;
     expect(day8.sourceBreakdown["devin-cli"].cost).toBeCloseTo(8, 4);
+  });
+
+  it("heals a stored day whose every row the corrected generation drops", async () => {
+    const store = newStore();
+    // Generation 1 dated 1,000 tokens on the 6th from rows that are all
+    // request_id duplicates of the 7th (a response persisted across
+    // midnight). Generation 2 counts nothing on the 6th, so the snapshot
+    // never dates it; only the proof can say why the stored row is empty.
+    seedDay(store, "2026-10-06", { "devin-cli": devinCell(1_000, 10) });
+    seedDay(store, "2026-10-07", { "devin-cli": devinCell(2_000, 20) });
+
+    const json = await submit(
+      store,
+      submissionBody(
+        [{ date: "2026-10-07", tokens: 2_000, cost: 20, previous: { tokens: 2_000, cost: 20 } }],
+        { allDuplicateDays: [{ date: "2026-10-06", previous: { tokens: 1_000, cost: 10 } }] },
+      ),
+    );
+
+    expect(storedClientTokens(store, "2026-10-06", "devin-cli")).toBeUndefined();
+    expect(storedClientTokens(store, "2026-10-07", "devin-cli")).toBe(2_000);
+    expect(storedTokens(store)).toBe(2_000);
+    expect(storedCost(store)).toBeCloseTo(20, 4);
+    expect(
+      json.warnings?.some((warning: string) =>
+        warning.includes("Corrected Devin CLI history on 1 day(s)") &&
+        warning.includes("removed 1,000 tokens and $10.0000"),
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses a proof whose corrected cost sits below the submitted snapshot", async () => {
+    const store = newStore();
+    seedDay(store, "2026-10-07", { "devin-cli": devinCell(2_000, 20) });
+
+    // The token side reproduces the snapshot exactly, but the proof claims
+    // the corrected rows cost nothing while the snapshot prices them at $9.
+    // Accepting it would floor the stored cost under what this scan reports.
+    const json = await submit(
+      store,
+      submissionBody([
+        {
+          date: "2026-10-07",
+          tokens: 900,
+          cost: 9,
+          previous: { tokens: 2_000, cost: 20 },
+          provenCorrected: { tokens: 900, cost: 0 },
+        },
+      ]),
+    );
+
+    expect(storedClientTokens(store, "2026-10-07", "devin-cli")).toBe(2_000);
+    expect(storedCost(store)).toBeCloseTo(20, 4);
+    expect(
+      json.warnings?.some((warning: string) =>
+        warning.includes("Ignored the Devin CLI recount proof for 1 day(s)"),
+      ),
+    ).toBe(true);
   });
 });

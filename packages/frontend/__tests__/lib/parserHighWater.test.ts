@@ -1980,6 +1980,84 @@ describe("devin-cli recount proof", () => {
     expect(plan.recountDays).toEqual(["2026-10-07", "2026-10-08"]);
     expect(plan.nextState?.aggregate.tokens).toBe(689_000_000);
   });
+
+  it("keeps a first empty snapshot pending even with nothing stored", () => {
+    // A failed first read on a fresh device must not consume the transition:
+    // baselining generation 2 on nothing would freeze the generation-1
+    // submits this device may still make before it upgrades.
+    const empty = devinPlan({}, {});
+
+    expect(empty.mode).toBe("freeze");
+    expect(empty.nextState?.baselineEstablished).toBe(false);
+
+    const followed = devinPlan({}, correctedScan, {
+      state: empty.nextState,
+      recountProof: fullProof,
+    });
+    expect(followed.mode).toBe("baseline-new");
+    expect(followed.nextState?.aggregate.tokens).toBe(689_000_000);
+  });
+
+  it("rejects a proof whose corrected cost sits below the submitted cost", () => {
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000, "swe-2-high", 20));
+    const scan = devinSnapshot(devinContribution("2026-10-08", 455, "swe-2-high", 9));
+    const plan = devinPlan(stored, scan, {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(1_000, 20), corrected: proofCell(455, 0) },
+      }),
+    });
+
+    // Tokens match the snapshot, but the proof would floor cost under what
+    // this very scan prices the rows at.
+    expect(plan.rejectedRecountDays).toEqual(["2026-10-08"]);
+    expect(plan.recountDays).toBeUndefined();
+    expect(plan.nextState?.days["2026-10-08"]?.cost).toBe(20);
+  });
+
+  it("accepts a proof whose corrected cost exceeds a submission that zeroed unpriced rows", () => {
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000, "swe-2-high", 20));
+    // Submission zeroes cost it cannot price after the proof was built, so
+    // the snapshot may carry LESS cost than the proof's corrected side.
+    const scan = devinSnapshot(devinContribution("2026-10-08", 455, "swe-2-high", 0));
+    const plan = devinPlan(stored, scan, {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(1_000, 20), corrected: proofCell(455, 9) },
+      }),
+    });
+
+    expect(plan.recountDays).toEqual(["2026-10-08"]);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(455);
+    expect(plan.nextState?.days["2026-10-08"]?.cost).toBe(9);
+  });
+
+  it("applies an all-duplicate proof day the snapshot does not date", () => {
+    // Every generation-1 row on the 6th was a request_id duplicate of a row
+    // dated elsewhere, so generation 2 reports nothing for the day. The proof
+    // may describe that absence exactly as an empty corrected side.
+    const stored = devinSnapshot(
+      devinContribution("2026-10-06", 88_000_000),
+      devinContribution("2026-10-08", 1_000_000_000)
+    );
+    const scan = devinSnapshot(devinContribution("2026-10-08", 455_000_000));
+    const plan = devinPlan(stored, scan, {
+      recountProof: proof({
+        "2026-10-06": { previous: proofCell(88_000_000), corrected: proofCell(0, 0, 0) },
+        "2026-10-08": { previous: proofCell(1_000_000_000), corrected: proofCell(455_000_000) },
+      }),
+    });
+
+    expect(plan.recountDays).toEqual(["2026-10-06", "2026-10-08"]);
+    expect(plan.nextState?.aggregate.tokens).toBe(455_000_000);
+
+    // A non-empty corrected side for an undated day is still a proof for
+    // rows the snapshot does not contain, and is refused.
+    const mismatched = devinPlan(stored, scan, {
+      recountProof: proof({
+        "2026-10-06": { previous: proofCell(88_000_000), corrected: proofCell(10) },
+      }),
+    });
+    expect(mismatched.rejectedRecountDays).toEqual(["2026-10-06"]);
+  });
 });
 
 describe("per-client full-history scope", () => {
