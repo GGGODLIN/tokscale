@@ -70,7 +70,7 @@ fn probe_tty(output: &mut impl Write) -> io::Result<ProbeResult> {
         .and_then(|()| output.flush());
 
     let read = if query_result.is_ok() {
-        read_dsr_with_timeout(PROBE_TIMEOUT, |remaining| {
+        read_dsr_with_clock(PROBE_TIMEOUT, Instant::now, |remaining| {
             poll_and_read(nonblocking.fd, remaining)
         })
     } else {
@@ -226,12 +226,21 @@ struct DsrRead {
     pending: Vec<u8>,
 }
 
+/// Drive the DSR read loop against an injected monotonic clock.
+///
+/// Production passes [`Instant::now`]. Tests pass deterministic fake clocks:
+/// the deadline arithmetic must not depend on how fast the host executes the
+/// loop body. Under cargo-tarpaulin's ptrace engine the first pass through
+/// this loop is slowed by orders of magnitude (every uncovered line is a
+/// breakpoint trap serviced by a single-core-pinned tracer), so tests that
+/// raced a real 2-20 ms wall-clock budget failed only under coverage.
 #[cfg(any(unix, test))]
-fn read_dsr_with_timeout<F>(timeout: Duration, mut next_chunk: F) -> DsrRead
+fn read_dsr_with_clock<C, F>(timeout: Duration, mut now: C, mut next_chunk: F) -> DsrRead
 where
+    C: FnMut() -> Instant,
     F: FnMut(Duration) -> io::Result<Option<Vec<u8>>>,
 {
-    let Some(deadline) = Instant::now().checked_add(timeout) else {
+    let Some(deadline) = now().checked_add(timeout) else {
         return DsrRead::default();
     };
     let mut parser = DsrParser::default();
@@ -239,7 +248,7 @@ where
     let mut scan_from = 0;
 
     loop {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        let Some(remaining) = deadline.checked_duration_since(now()) else {
             return DsrRead {
                 position,
                 pending: parser.pending,
@@ -611,10 +620,19 @@ mod tests {
         assert_eq!(parse_dsr(b"\x1b[999999;2Rnoise\x1b[1;2R"), Some((1, 2)));
     }
 
+    /// A clock whose reading is advanced only by the test, so deadline
+    /// behaviour never depends on how fast the host runs the loop body.
+    fn frozen_clock() -> impl FnMut() -> Instant {
+        let now = Instant::now();
+        move || now
+    }
+
     #[test]
     fn preserves_keys_surrounding_the_cursor_report() {
         let mut chunks = vec![b"q\x1b[1;".to_vec(), b"2R\x1b[B".to_vec()].into_iter();
-        let read = read_dsr_with_timeout(Duration::from_millis(20), |_| Ok(chunks.next()));
+        let read = read_dsr_with_clock(Duration::from_millis(20), frozen_clock(), |_| {
+            Ok(chunks.next())
+        });
         assert_eq!(read.position, Some((1, 2)));
         let keys = decode_pending_keys(&read.pending);
         assert_eq!(keys.len(), 2);
@@ -637,14 +655,18 @@ mod tests {
     #[test]
     fn completes_utf8_and_arrow_sequences_split_around_the_cursor_report() {
         let mut utf8_chunks = vec![b"\xc3\x1b[1;2R".to_vec(), b"\xa9".to_vec()].into_iter();
-        let utf8 = read_dsr_with_timeout(Duration::from_millis(20), |_| Ok(utf8_chunks.next()));
+        let utf8 = read_dsr_with_clock(Duration::from_millis(20), frozen_clock(), |_| {
+            Ok(utf8_chunks.next())
+        });
         assert_eq!(
             decode_pending_keys(&utf8.pending)[0].code,
             KeyCode::Char('é')
         );
 
         let mut arrow_chunks = vec![b"\x1b[\x1b[1;2R".to_vec(), b"A".to_vec()].into_iter();
-        let arrow = read_dsr_with_timeout(Duration::from_millis(20), |_| Ok(arrow_chunks.next()));
+        let arrow = read_dsr_with_clock(Duration::from_millis(20), frozen_clock(), |_| {
+            Ok(arrow_chunks.next())
+        });
         assert_eq!(decode_pending_keys(&arrow.pending)[0].code, KeyCode::Up);
     }
 
@@ -679,33 +701,42 @@ mod tests {
     fn timeout_is_forwarded_as_a_strict_bound() {
         let timeout = Duration::from_millis(225);
         let mut observed = None;
-        let result = read_dsr_with_timeout(timeout, |remaining| {
+        let result = read_dsr_with_clock(timeout, frozen_clock(), |remaining| {
             observed = Some(remaining);
             Ok(None)
         });
 
         assert_eq!(result, DsrRead::default());
-        assert!(observed.is_some_and(|remaining| remaining <= timeout));
+        assert_eq!(observed, Some(timeout));
     }
 
     #[test]
     fn incomplete_replies_stop_at_the_absolute_timeout() {
-        let started = Instant::now();
+        // Every clock reading advances by 1 ms: the deadline is computed at
+        // 0 ms, the first loop check sees 1 ms remaining and polls, and the
+        // second check lands exactly on the 2 ms deadline and stops the read
+        // even though the reply never completed.
+        let base = Instant::now();
+        let mut reading = 0_u64;
+        let clock = move || {
+            let now = base + Duration::from_millis(reading);
+            reading += 1;
+            now
+        };
         let mut polls = 0;
-        let result = read_dsr_with_timeout(Duration::from_millis(2), |_| {
+        let result = read_dsr_with_clock(Duration::from_millis(2), clock, |_| {
             polls += 1;
             Ok(Some(Vec::new()))
         });
 
         assert_eq!(result, DsrRead::default());
-        assert!(polls > 0);
-        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(polls, 1);
     }
 
     #[test]
     fn zero_timeout_does_not_attempt_a_read() {
         let mut called = false;
-        let result = read_dsr_with_timeout(Duration::ZERO, |_| {
+        let result = read_dsr_with_clock(Duration::ZERO, frozen_clock(), |_| {
             called = true;
             Ok(None)
         });
