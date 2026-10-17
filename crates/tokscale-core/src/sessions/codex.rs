@@ -725,28 +725,37 @@ pub(crate) const CODEX_MAX_DECODED_BYTES_ENV: &str = "TOKSCALE_CODEX_MAX_DECODED
 /// reverts to the 1 GiB default, and the skipped-archive warning quotes that
 /// default, so without this the user is told their archives are too large
 /// while believing they already raised the ceiling.
-pub(crate) fn codex_archive_limit_override_is_usable(raw: Option<&str>) -> Option<bool> {
+///
+/// Takes an `OsStr` because a non-UTF-8 value is set-but-unusable, not unset.
+pub(crate) fn codex_archive_limit_override_is_usable(
+    raw: Option<&std::ffi::OsStr>,
+) -> Option<bool> {
     let raw = raw?;
     Some(parsed_codex_archive_limit(Some(raw)).is_some())
 }
 
-fn parsed_codex_archive_limit(raw: Option<&str>) -> Option<u64> {
-    raw.and_then(|v| v.trim().parse::<u64>().ok())
+fn parsed_codex_archive_limit(raw: Option<&std::ffi::OsStr>) -> Option<u64> {
+    raw.and_then(|v| v.to_str())
+        .and_then(|v| v.trim().parse::<u64>().ok())
         // `archive_limit.saturating_add(1)` bounds the decoder, so u64::MAX
         // would saturate and stop bounding it at all.
         .filter(|&v| v > 0 && v < u64::MAX)
 }
 
-pub(crate) fn parse_max_codex_archive_bytes(raw: Option<&str>) -> u64 {
+pub(crate) fn parse_max_codex_archive_bytes(raw: Option<&std::ffi::OsStr>) -> u64 {
     parsed_codex_archive_limit(raw).unwrap_or(MAX_CODEX_ARCHIVE_BYTES)
 }
 
 pub fn max_codex_archive_bytes() -> u64 {
-    let raw = std::env::var(CODEX_MAX_DECODED_BYTES_ENV).ok();
+    // `var` would report a set non-UTF-8 value as absent, so an undecodable
+    // setting would take the silent default this warning exists to prevent.
+    let raw = std::env::var_os(CODEX_MAX_DECODED_BYTES_ENV);
     // This is read per scanned archive and per cache-identity check, so the
     // diagnostic has to be emitted once rather than once per file.
     if codex_archive_limit_override_is_usable(raw.as_deref()) == Some(false) {
-        warn_invalid_codex_archive_limit_once(raw.as_deref().unwrap_or_default());
+        warn_invalid_codex_archive_limit_once(
+            &raw.as_deref().unwrap_or_default().to_string_lossy(),
+        );
     }
     parse_max_codex_archive_bytes(raw.as_deref())
 }
@@ -2658,6 +2667,7 @@ fn codex_message_is_human_turn(message: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use crate::{aggregate_model_usage_entries, GroupBy};
+    use std::ffi::OsStr;
     use std::io::{BufRead, Cursor, Error, ErrorKind, Seek, SeekFrom, Write};
     use tempfile::{NamedTempFile, TempDir};
 
@@ -5364,67 +5374,46 @@ mod tests {
 
     #[test]
     fn codex_archive_limit_override_usability_distinguishes_unset_from_invalid() {
+        let usable = |raw: &str| codex_archive_limit_override_is_usable(Some(OsStr::new(raw)));
         assert_eq!(codex_archive_limit_override_is_usable(None), None);
-        assert_eq!(
-            codex_archive_limit_override_is_usable(Some("65536")),
-            Some(true)
-        );
-        assert_eq!(
-            codex_archive_limit_override_is_usable(Some(" 2147483648 ")),
-            Some(true)
-        );
+        assert_eq!(usable("65536"), Some(true));
+        assert_eq!(usable(" 2147483648 "), Some(true));
         // Each of these silently reverts to the default, so each has to be
         // reported rather than treated as an accepted ceiling.
-        assert_eq!(
-            codex_archive_limit_override_is_usable(Some("0")),
-            Some(false)
-        );
-        assert_eq!(
-            codex_archive_limit_override_is_usable(Some("-1")),
-            Some(false)
-        );
-        assert_eq!(
-            codex_archive_limit_override_is_usable(Some("512MiB")),
-            Some(false)
-        );
-        assert_eq!(
-            codex_archive_limit_override_is_usable(Some("")),
-            Some(false)
-        );
-        assert_eq!(
-            codex_archive_limit_override_is_usable(Some(&u64::MAX.to_string())),
-            Some(false)
-        );
+        assert_eq!(usable("0"), Some(false));
+        assert_eq!(usable("-1"), Some(false));
+        assert_eq!(usable("512MiB"), Some(false));
+        assert_eq!(usable(""), Some(false));
+        assert_eq!(usable(&u64::MAX.to_string()), Some(false));
+
+        // A set but undecodable value is unusable, not unset: `env::var` would
+        // report it as absent and take the silent default.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            let undecodable = OsStr::from_bytes(b"512\xff");
+            assert_eq!(
+                codex_archive_limit_override_is_usable(Some(undecodable)),
+                Some(false)
+            );
+            assert_eq!(
+                parse_max_codex_archive_bytes(Some(undecodable)),
+                MAX_CODEX_ARCHIVE_BYTES
+            );
+        }
     }
 
     #[test]
     fn parse_max_codex_archive_bytes_validates_bounds_and_falls_back() {
+        let parse = |raw: &str| parse_max_codex_archive_bytes(Some(OsStr::new(raw)));
         assert_eq!(parse_max_codex_archive_bytes(None), MAX_CODEX_ARCHIVE_BYTES);
-        assert_eq!(parse_max_codex_archive_bytes(Some("65536")), 65_536);
-        assert_eq!(
-            parse_max_codex_archive_bytes(Some(" 2147483648 ")),
-            2_147_483_648
-        );
-        assert_eq!(
-            parse_max_codex_archive_bytes(Some(&(u64::MAX - 1).to_string())),
-            u64::MAX - 1
-        );
-        assert_eq!(
-            parse_max_codex_archive_bytes(Some("0")),
-            MAX_CODEX_ARCHIVE_BYTES
-        );
-        assert_eq!(
-            parse_max_codex_archive_bytes(Some("-1")),
-            MAX_CODEX_ARCHIVE_BYTES
-        );
-        assert_eq!(
-            parse_max_codex_archive_bytes(Some("invalid")),
-            MAX_CODEX_ARCHIVE_BYTES
-        );
-        assert_eq!(
-            parse_max_codex_archive_bytes(Some(&u64::MAX.to_string())),
-            MAX_CODEX_ARCHIVE_BYTES
-        );
+        assert_eq!(parse("65536"), 65_536);
+        assert_eq!(parse(" 2147483648 "), 2_147_483_648);
+        assert_eq!(parse(&(u64::MAX - 1).to_string()), u64::MAX - 1);
+        assert_eq!(parse("0"), MAX_CODEX_ARCHIVE_BYTES);
+        assert_eq!(parse("-1"), MAX_CODEX_ARCHIVE_BYTES);
+        assert_eq!(parse("invalid"), MAX_CODEX_ARCHIVE_BYTES);
+        assert_eq!(parse(&u64::MAX.to_string()), MAX_CODEX_ARCHIVE_BYTES);
     }
 
     #[test]

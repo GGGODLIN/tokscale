@@ -7548,6 +7548,14 @@ fn test_codex_invalid_max_decoded_bytes_env_warns_and_uses_default() {
         stderr.contains("using the default 1073741824-byte decoded-size limit"),
         "stderr: {stderr}"
     );
+    // The limit is read once per scanned archive and again per cache-identity
+    // check, so a per-call warning would repeat. `contains` alone passes either
+    // way, which is what makes the count the assertion that matters.
+    assert_eq!(
+        stderr.matches("TOKSCALE_CODEX_MAX_DECODED_BYTES=").count(),
+        1,
+        "the invalid-setting warning must be emitted once per process; stderr: {stderr}"
+    );
     // The archive is well under the default, so the invalid value must not cost
     // the user their usage.
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
