@@ -115,6 +115,7 @@ assert_excludes() {
 cd "${ROOT_DIR}"
 notes="$(bun scripts/generate-release-notes.ts 1.2.3)"
 assert_contains "${notes}" '<div align="center">'
+assert_contains "${notes}" '[![Tokscale](https://github.com/acme/tokscale/raw/main/.github/assets/hero-v3.png)](https://github.com/acme/tokscale)'
 assert_contains "${notes}" '# `tokscale@v1.2.3` is here!'
 assert_contains "${notes}" '* fix(cli): keep release notifications deterministic by @alice in https://github.com/acme/tokscale/pull/77'
 assert_contains "${notes}" '* @alice made their first contribution in https://github.com/acme/tokscale/pull/77'
