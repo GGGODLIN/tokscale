@@ -161,41 +161,67 @@ pub fn is_devin_cli_request_dedup_key(key: Option<&str>) -> bool {
     key.is_some_and(|key| key.starts_with("devin-cli:") && key.contains(":request:"))
 }
 
+/// The row query [`parse_devin_cli_sqlite`] runs, shared with the readability
+/// probe so the probe can only pass when this exact statement prepares and
+/// steps against the database.
+///
+/// Token usage metrics live inside the `chat_message` JSON blob under
+/// `$.metadata.metrics`, NOT in the separate `metadata` SQL column (which is
+/// always NULL in real Devin CLI databases). The per-message model is
+/// `$.metadata.generation_model`; `sessions.model` is only a fallback because
+/// it can be "adaptive" (a routing mode, not a real model id).
+///
+/// message_nodes.created_at is stored as Unix seconds; convert to ms.
+const DEVIN_CLI_MESSAGE_QUERY: &str = r#"
+        SELECT
+            m.row_id,
+            m.session_id,
+            m.chat_message,
+            m.created_at * 1000 AS created_at_ms,
+            s.model,
+            s.working_directory
+        FROM message_nodes m
+        JOIN sessions s ON m.session_id = s.id
+        ORDER BY m.row_id
+    "#;
+
 /// Whether a discovered Devin CLI database can actually be read end to end.
 ///
 /// [`parse_devin_cli_sqlite`] deliberately swallows open, prepare and step
 /// failures: a database that cannot be opened and one with no usage both
 /// produce no rows. That is right for a local report, but a submission that
 /// rewrites server history on the strength of a "complete" scan needs to know
-/// the difference. A database without the `message_nodes`/`sessions` tables is
+/// the difference. A database without a `message_nodes` table is
 /// readable-and-empty here, since no generation ever counted rows from it.
+/// Once that table exists, the parser's own statement must prepare and run:
+/// a missing `sessions` table or a missing column is a schema the parser
+/// cannot read, not an empty history.
 pub fn devin_cli_source_is_readable(db_path: &Path) -> bool {
     let Some(conn) = open_readonly_sqlite_opt(db_path) else {
         return false;
     };
-    let mut tables = 0usize;
+    let mut has_message_nodes = false;
     let listed = sqlite_for_each_row_on(
         &conn,
         db_path,
-        "SELECT name FROM sqlite_master \
-         WHERE type = 'table' AND name IN ('message_nodes', 'sessions')",
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_nodes'",
         None,
         &mut |_row| {
-            tables += 1;
+            has_message_nodes = true;
             Ok(())
         },
     );
     if !listed.completed() {
         return false;
     }
-    if tables < 2 {
+    if !has_message_nodes {
         return true;
     }
     let mut counted = false;
     let scan = sqlite_for_each_row_on(
         &conn,
         db_path,
-        "SELECT COUNT(*) FROM message_nodes m JOIN sessions s ON m.session_id = s.id",
+        &format!("SELECT COUNT(*) FROM ({DEVIN_CLI_MESSAGE_QUERY})"),
         None,
         &mut |row| {
             let _count: i64 = row.get(0)?;
@@ -212,25 +238,7 @@ pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         return Vec::new();
     };
 
-    // Token usage metrics live inside the `chat_message` JSON blob under
-    // `$.metadata.metrics`, NOT in the separate `metadata` SQL column (which is
-    // always NULL in real Devin CLI databases). The per-message model is
-    // `$.metadata.generation_model`; `sessions.model` is only a fallback because
-    // it can be "adaptive" (a routing mode, not a real model id).
-    //
-    // message_nodes.created_at is stored as Unix seconds; convert to ms.
-    let query = r#"
-        SELECT
-            m.row_id,
-            m.session_id,
-            m.chat_message,
-            m.created_at * 1000 AS created_at_ms,
-            s.model,
-            s.working_directory
-        FROM message_nodes m
-        JOIN sessions s ON m.session_id = s.id
-        ORDER BY m.row_id
-    "#;
+    let query = DEVIN_CLI_MESSAGE_QUERY;
 
     let mut messages = Vec::new();
 
@@ -853,6 +861,30 @@ mod tests {
             .execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY)")
             .unwrap();
         assert!(devin_cli_source_is_readable(&legacy_path));
+
+        // `message_nodes` without `sessions`, or without a column the parser
+        // selects, is a schema the parser's statement cannot read: it yields
+        // no rows, but not because the history is empty.
+        let orphan_path = dir.path().join("orphan.db");
+        Connection::open(&orphan_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, chat_message TEXT, created_at INTEGER)",
+            )
+            .unwrap();
+        assert!(!devin_cli_source_is_readable(&orphan_path));
+        assert!(parse_devin_cli_sqlite(&orphan_path).is_empty());
+
+        let narrow_path = dir.path().join("narrow.db");
+        Connection::open(&narrow_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT);
+                 CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, created_at INTEGER)",
+            )
+            .unwrap();
+        assert!(!devin_cli_source_is_readable(&narrow_path));
+        assert!(parse_devin_cli_sqlite(&narrow_path).is_empty());
 
         // The parser returns no rows for either of these too, which is exactly
         // why a separate probe has to tell them apart from the cases above.
