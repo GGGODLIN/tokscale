@@ -1220,8 +1220,15 @@ fn ensure_cache_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Decodes by content, not by file extension. Remote icons are cached under a
+/// `.png` name even when the source is a JPEG (claude.jpg, cursor.jpg, ...), and
+/// `image::open` picks the PNG decoder from the extension and fails on those.
 fn load_rgba_image(path: &Path) -> Result<RgbaImage> {
-    Ok(image::open(path)
+    Ok(image::ImageReader::open(path)
+        .with_context(|| format!("Failed to open image {}", path.display()))?
+        .with_guessed_format()
+        .with_context(|| format!("Failed to read image {}", path.display()))?
+        .decode()
         .with_context(|| format!("Failed to decode image {}", path.display()))?
         .to_rgba8())
 }
@@ -1816,6 +1823,19 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::env;
+
+    #[test]
+    fn load_rgba_image_decodes_a_jpeg_cached_under_a_png_name() {
+        // Client icons such as claude.jpg are cached as `client-claude-code@2x.png`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client-claude-code@2x.png");
+        image::RgbImage::from_pixel(4, 4, image::Rgb([200, 100, 50]))
+            .save_with_format(&path, image::ImageFormat::Jpeg)
+            .unwrap();
+
+        let loaded = load_rgba_image(&path).expect("JPEG bytes behind a .png name must decode");
+        assert_eq!((loaded.width(), loaded.height()), (4, 4));
+    }
     use tempfile::TempDir;
 
     fn restore_env_var(key: &str, value: Option<std::ffi::OsString>) {
