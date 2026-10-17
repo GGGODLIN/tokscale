@@ -3,7 +3,8 @@ import { TOKSCALE_X_HANDLE } from "@/lib/community";
 import { getPublicOrigin } from "./urls";
 
 export function getRootMetadata(origin = getPublicOrigin()): Metadata {
-  const ogImage = `${origin}/og-image.png`;
+  // Bump the query when og-image.png changes so social crawlers refetch it.
+  const ogImage = `${origin}/og-image.png?v=3`;
 
   return {
     metadataBase: new URL(origin),
@@ -23,7 +24,7 @@ export function getRootMetadata(origin = getPublicOrigin()): Metadata {
       type: "website",
       url: origin,
       siteName: "Tokscale",
-      images: [{ url: ogImage, width: 1200, height: 630, alt: "Tokscale - AI Token Usage Tracker" }],
+      images: [{ url: ogImage, width: 2400, height: 1260, alt: "Tokscale - AI Token Usage Tracker" }],
     },
     twitter: {
       card: "summary_large_image",

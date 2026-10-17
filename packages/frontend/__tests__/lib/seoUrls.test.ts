@@ -30,9 +30,9 @@ describe("root metadata", () => {
     expect(metadata.metadataBase?.toString()).toBe("https://runtime.example/");
     expect(metadata.openGraph?.url).toBe("https://runtime.example");
     expect(metadata.openGraph?.images).toEqual(expect.arrayContaining([
-      expect.objectContaining({ url: "https://runtime.example/og-image.png" }),
+      expect.objectContaining({ url: "https://runtime.example/og-image.png?v=3" }),
     ]));
-    expect(metadata.twitter?.images).toContain("https://runtime.example/og-image.png");
+    expect(metadata.twitter?.images).toContain("https://runtime.example/og-image.png?v=3");
   });
 
   it("attributes X cards to the Tokscale account", () => {
