@@ -350,8 +350,6 @@ enum Commands {
             help = "Show Top Clients instead of Top OpenCode Agents"
         )]
         show_clients: bool,
-        #[arg(long, help = "Disable pinning of Sisyphus agents in rankings")]
-        disable_pinned: bool,
         #[arg(long, help = "Disable loading spinner (for scripting)")]
         no_spinner: bool,
     },
@@ -957,20 +955,11 @@ fn main() -> Result<()> {
             short,
             agents,
             show_clients,
-            disable_pinned,
             no_spinner: _,
         }) => {
             reject_unsupported_home_override(&cli.home, "wrapped")?;
             let client_filter = build_client_filter(client_flags, &cli.home);
-            run_wrapped_command(
-                output,
-                year,
-                client_filter,
-                short,
-                agents,
-                show_clients,
-                disable_pinned,
-            )
+            run_wrapped_command(output, year, client_filter, short, agents, show_clients)
         }
         Some(Commands::Amp { subcommand }) => {
             reject_unsupported_home_override(&cli.home, "amp")?;
@@ -3818,7 +3807,6 @@ fn run_wrapped_command(
     short: bool,
     agents: bool,
     show_clients: bool,
-    disable_pinned: bool,
 ) -> Result<()> {
     use colored::Colorize;
 
@@ -3834,7 +3822,6 @@ fn run_wrapped_command(
         clients: client_filter,
         short,
         include_agents,
-        pin_sisyphus: !disable_pinned,
     };
 
     match commands::wrapped::run(wrapped_options) {
