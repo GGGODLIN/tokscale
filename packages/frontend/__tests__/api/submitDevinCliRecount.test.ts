@@ -560,7 +560,7 @@ describe("POST /api/submit devin-cli recount", () => {
     expect(json.warnings?.some((warning: string) => warning.includes("Recounted"))).toBe(true);
   });
 
-  it("freezes generation-1 submissions so the old parser cannot keep inflating", async () => {
+  it("keeps generation-1 submissions compatible before the transition", async () => {
     const store = newStore();
     seedInflatedDays(store);
 
@@ -574,9 +574,40 @@ describe("POST /api/submit devin-cli recount", () => {
     const json = await response.json();
 
     expect(response.status).toBe(200);
-    expect(storedTokens(store)).toBe(1_602_000_000);
-    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(1_000_000_000);
+    // The receiver reaches production before a generation-2 CLI release. An
+    // installed generation-1 CLI must retain the pre-deploy merge behavior
+    // until this device starts its transition.
+    expect(storedTokens(store)).toBe(2_602_000_000);
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(2_000_000_000);
     expect(store.device.parserVersions["devin-cli"]).toBeUndefined();
+    expect(
+      (json.warnings ?? []).some((warning: string) => warning.includes("Ignored")),
+    ).toBe(false);
+  });
+
+  it("freezes generation 1 after the generation-2 transition", async () => {
+    const store = newStore();
+    seedInflatedDays(store);
+
+    installTx(store);
+    const transition = submissionBody(CORRECTED_SCAN);
+    mockSubmit(transition);
+    expect((await post(transition)).status).toBe(200);
+    expect(storedTokens(store)).toBe(777_000_000);
+
+    installTx(store);
+    const old = submissionBody(
+      [{ date: "2026-10-08", tokens: 2_000_000_000, cost: 2000 }],
+      { version: 1 },
+    );
+    mockSubmit(old);
+    const response = await post(old);
+    const json = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(storedTokens(store)).toBe(777_000_000);
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(455_000_000);
+    expect(store.device.parserVersions["devin-cli"]).toBe(2);
     expect(json.warnings?.some((warning: string) => warning.includes("Ignored"))).toBe(true);
   });
 

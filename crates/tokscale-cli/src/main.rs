@@ -5015,7 +5015,8 @@ const MICODE_SUBMISSION_PARSER_VERSION: u32 = 2;
 // instead of row_id (ea4dd97e, parser cache v3->v4). That generation counts
 // the same history strictly LOWER, so the server treats it as a recounting
 // generation: a full snapshot at this version replaces stored cells instead
-// of advancing a lifetime high-water. Generation 1 submissions freeze.
+// of advancing a lifetime high-water. The receiver accepts generation 1 only
+// until a device starts this transition, then freezes every older submit.
 const DEVIN_CLI_SUBMISSION_PARSER_VERSION: u32 = 2;
 
 #[derive(serde::Serialize)]

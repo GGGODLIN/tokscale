@@ -808,11 +808,19 @@ export function planParserHighWaterSubmission(args: {
   if (args.incomingVersion == null) {
     return args.state ? { mode: "freeze", increments: {} } : { mode: "status-quo", increments: {} };
   }
-  // Amp v1 is the already-released created-time parser. Keep accepting it for
-  // devices that have not transitioned yet, but never let an older CLI rewrite
-  // a v2 timestamp-attributed device after the receiver has established v2.
-  if (args.client === "amp" && args.incomingVersion === 1) {
-    return args.state ? { mode: "freeze", increments: {} } : { mode: "status-quo", increments: {} };
+  // Amp v1 and Devin CLI v1 are already released when their receivers deploy.
+  // Keep accepting them for devices that have not transitioned yet, but never
+  // let an older CLI rewrite a device after the receiver has started the new
+  // generation. This preserves the existing submit behavior during the
+  // server-before-CLI rollout without reopening a completed (or pending)
+  // transition to the old parser.
+  if (
+    (args.client === "amp" || args.client === "devin-cli") &&
+    args.incomingVersion === 1
+  ) {
+    return args.state
+      ? { mode: "freeze", increments: {} }
+      : { mode: "status-quo", increments: {} };
   }
   if (args.incomingVersion !== supportedVersion) {
     return { mode: "freeze", increments: {} };

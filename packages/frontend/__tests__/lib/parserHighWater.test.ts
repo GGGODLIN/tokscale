@@ -1664,13 +1664,32 @@ describe("devin-cli recount", () => {
     expect(grown.nextState?.aggregate.tokens).toBe(700_000_000);
   });
 
-  it("freezes the still-inflating generation-1 submissions", () => {
+  it("keeps generation-1 submissions compatible before the transition", () => {
     const plan = planParserHighWaterSubmission({
       client: "devin-cli",
       incomingVersion: 1,
       fullHistory: true,
       existingLegacyDays: inflatedStored,
       incomingDays: inflatedStored,
+    });
+
+    // The receiver deploys before a generation-2 CLI is released. Preserve the
+    // existing merge behavior until this device starts its transition rather
+    // than silently dropping Devin usage from every installed CLI.
+    expect(plan.mode).toBe("status-quo");
+    expect(plan.nextState).toBeUndefined();
+  });
+
+  it("freezes generation 1 after the generation-2 transition starts", () => {
+    const state = devinPlan(inflatedStored, correctedScan).nextState!;
+    const plan = planParserHighWaterSubmission({
+      client: "devin-cli",
+      incomingVersion: 1,
+      fullHistory: true,
+      existingLegacyDays: correctedScan,
+      incomingDays: inflatedStored,
+      state,
+      persistedVersion: 2,
     });
 
     expect(plan.mode).toBe("freeze");
