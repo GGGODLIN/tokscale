@@ -1714,6 +1714,19 @@ describe("devin-cli recount", () => {
     expect(followed.mode).toBe("recount");
   });
 
+  it("does not burn the one-time recount on an empty client snapshot", () => {
+    const empty = devinPlan(inflatedStored, {});
+
+    // A default all-client submit declares every default parser even when this
+    // client produced no rows. Keep the transition pending so a missing,
+    // unreadable, or removed Devin database cannot consume the only recount.
+    expect(empty.mode).toBe("freeze");
+    expect(empty.nextState?.baselineEstablished).toBe(false);
+
+    const followed = devinPlan(inflatedStored, correctedScan, empty.nextState);
+    expect(followed.mode).toBe("recount");
+  });
+
   it("baselines normally when no inflated history is stored", () => {
     const plan = devinPlan({}, correctedScan);
 

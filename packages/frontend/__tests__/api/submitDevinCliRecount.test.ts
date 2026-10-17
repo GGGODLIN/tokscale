@@ -611,6 +611,84 @@ describe("POST /api/submit devin-cli recount", () => {
     expect(json.warnings?.some((warning: string) => warning.includes("Ignored"))).toBe(true);
   });
 
+  it("keeps a declared but empty Devin transition pending until meaningful history arrives", async () => {
+    const store = newStore();
+    seedInflatedDays(store);
+
+    // Default submits declare every default parser. Model that real payload:
+    // another client has data, while Devin is declared at generation 2 but
+    // contributes no rows because its local database is absent or unreadable.
+    installTx(store);
+    const declaredOnly = submissionBody([
+      { date: "2026-10-08", tokens: 50, cost: 0.05 },
+    ]);
+    declaredOnly.summary.clients = ["claude"];
+    declaredOnly.contributions[0].clients[0].client = "claude";
+    mockSubmit(declaredOnly);
+    const emptyResponse = await post(declaredOnly);
+
+    expect(emptyResponse.status).toBe(200);
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(
+      1_000_000_000,
+    );
+    expect(store.device.parserVersions["devin-cli"]).toBe(2);
+    expect(
+      (store.device.parserStates["devin-cli"] as { baselineEstablished?: boolean })
+        .baselineEstablished,
+    ).toBe(false);
+
+    // Once a generation-2 transition is pending, an old autosubmit binary may
+    // not inflate the device while it waits for meaningful generation-2 data.
+    installTx(store);
+    const old = submissionBody(
+      [{ date: "2026-10-08", tokens: 2_000_000_000, cost: 2000 }],
+      { version: 1 },
+    );
+    mockSubmit(old);
+    const oldResponse = await post(old);
+    expect(oldResponse.status).toBe(200);
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(
+      1_000_000_000,
+    );
+
+    // The first snapshot that actually carries Devin history gets the one
+    // recount. Replaying it is idempotent and cannot spend the transition again.
+    installTx(store);
+    const corrected = submissionBody(CORRECTED_SCAN);
+    mockSubmit(corrected);
+    expect((await post(corrected)).status).toBe(200);
+    expect(storedTokens(store)).toBe(777_000_050);
+
+    installTx(store);
+    mockSubmit(corrected);
+    expect((await post(corrected)).status).toBe(200);
+    expect(storedTokens(store)).toBe(777_000_050);
+  });
+
+  it("preserves stored Devin history across a partial generation-2 payload", async () => {
+    const store = newStore();
+    seedInflatedDays(store);
+
+    installTx(store);
+    const partial = submissionBody(
+      [{ date: "2026-10-08", tokens: 1, cost: 0.001 }],
+      { fullHistory: false },
+    );
+    mockSubmit(partial);
+    expect((await post(partial)).status).toBe(200);
+    expect(storedTokens(store)).toBe(1_602_000_000);
+    expect(
+      (store.device.parserStates["devin-cli"] as { baselineEstablished?: boolean })
+        .baselineEstablished,
+    ).toBe(false);
+
+    installTx(store);
+    const corrected = submissionBody(CORRECTED_SCAN);
+    mockSubmit(corrected);
+    expect((await post(corrected)).status).toBe(200);
+    expect(storedTokens(store)).toBe(777_000_000);
+  });
+
   it("does not recount a second time once the transition state persists", async () => {
     const store = newStore();
     seedInflatedDays(store);

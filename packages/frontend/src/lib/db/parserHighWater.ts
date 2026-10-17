@@ -446,6 +446,24 @@ function recountLayoutPlan(args: {
   if (!RECOUNTING_GENERATION_CLIENTS.has(args.client)) {
     return null;
   }
+  // A default all-client scan declares every default parser, including clients
+  // that produced no rows. An empty client snapshot is not evidence that the
+  // recounting parser actually read this client's history, so keep the
+  // transition pending instead of spending its one rewrite on a no-op.
+  if (Object.keys(args.incomingDays).length === 0) {
+    return {
+      mode: "freeze",
+      increments: createSafeRecord<ClientBreakdownData>(),
+      nextState: {
+        stateVersion: PARSER_HIGH_WATER_STATE_VERSION,
+        version: args.version,
+        baselineEstablished: false,
+        aggregate: emptyAggregate(),
+        days: createSafeRecord<ClientBreakdownData>(),
+        observedDays: createSafeRecord<ClientBreakdownData>(),
+      },
+    };
+  }
   const days = normalizeStateDays({
     ...args.existingLegacyDays,
     ...args.incomingDays,
