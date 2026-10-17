@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   addClientBreakdownIncrement,
+  applyRecountProofToCell,
   foldParserClientSnapshot,
   planParserHighWaterSubmission,
   scanScopeCoversFullHistory,
   SUPPORTED_VERSIONED_PARSERS,
+  type ClientRecountProof,
   type ParserClientHighWaterState,
   type ParserHighWaterPlan,
+  type RecountProofCell,
 } from "../../src/lib/db/parserHighWater";
 import {
   mergeClientBreakdownsWithRegressionGuard,
@@ -1529,8 +1532,14 @@ describe("droid parser high-water", () => {
   });
 });
 
-describe("devin-cli recount", () => {
-  function devinContribution(date: string, tokens: number, modelId = "swe-2-high") {
+describe("devin-cli recount proof", () => {
+  function devinContribution(
+    date: string,
+    tokens: number,
+    modelId = "swe-2-high",
+    cost = 0,
+    messages = 1
+  ) {
     return {
       date,
       clients: [
@@ -1544,8 +1553,8 @@ describe("devin-cli recount", () => {
             cacheWrite: 0,
             reasoning: 0,
           },
-          cost: 0,
-          messages: 1,
+          cost,
+          messages,
         },
       ],
     };
@@ -1555,10 +1564,33 @@ describe("devin-cli recount", () => {
     return foldParserClientSnapshot(rows, "devin-cli");
   }
 
+  function proofCell(tokens: number, cost = 0, messages = 1): RecountProofCell {
+    return {
+      tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+      cost,
+      messages,
+    };
+  }
+
+  /** `date -> { previous, corrected }` for the single `swe-2-high` model. */
+  function proof(
+    days: Record<
+      string,
+      { previous: RecountProofCell; corrected: RecountProofCell; modelId?: string }
+    >
+  ): ClientRecountProof {
+    return Object.fromEntries(
+      Object.entries(days).map(([date, entry]) => [
+        date,
+        { [entry.modelId ?? "swe-2-high"]: { previous: entry.previous, corrected: entry.corrected } },
+      ])
+    );
+  }
+
   function devinPlan(
     existingLegacyDays: Record<string, ClientBreakdownData>,
     incomingDays: Record<string, ClientBreakdownData>,
-    state?: ParserClientHighWaterState
+    options: { state?: ParserClientHighWaterState; recountProof?: ClientRecountProof } = {}
   ) {
     return planParserHighWaterSubmission({
       client: "devin-cli",
@@ -1566,14 +1598,16 @@ describe("devin-cli recount", () => {
       fullHistory: true,
       existingLegacyDays,
       incomingDays,
-      state,
+      state: options.state,
+      recountProof: options.recountProof,
     });
   }
 
   // The row_id-dedup generation counted each persisted copy of a Devin
   // assistant response; the request_id-dedup generation counts each API
   // request once, so the corrected snapshot lands strictly BELOW the stored
-  // cells it must replace.
+  // cells. The proof says, per day, what both generations count from the
+  // same rows.
   const inflatedStored = devinSnapshot(
     devinContribution("2026-10-07", 514_000_000),
     devinContribution("2026-10-08", 1_000_000_000)
@@ -1582,16 +1616,20 @@ describe("devin-cli recount", () => {
     devinContribution("2026-10-07", 234_000_000),
     devinContribution("2026-10-08", 455_000_000)
   );
+  const fullProof = proof({
+    "2026-10-07": { previous: proofCell(514_000_000), corrected: proofCell(234_000_000) },
+    "2026-10-08": { previous: proofCell(1_000_000_000), corrected: proofCell(455_000_000) },
+  });
 
   it("is registered at the generation the deduplicating CLI declares", () => {
     // Generation 2 is the request_id recount. A registered version of 1 would
-    // recount on every generation-1 (still-inflating) submission; a version
+    // accept proofs from a generation that never computes them; a version
     // above 2 would freeze the only CLI that can heal the stored rows.
     expect(SUPPORTED_VERSIONED_PARSERS["devin-cli"]).toBe(2);
   });
 
   it("shows why the merge guard alone can never heal the inflated cells", () => {
-    // Without the recount this is what the submit route stores: the same-day
+    // Without a proof this is what the submit route stores: the same-day
     // regression guard preserves the higher stored value on every covered
     // day, so the inflation is locked in forever.
     let stored = 0;
@@ -1609,48 +1647,138 @@ describe("devin-cli recount", () => {
     expect(stored).toBe(1_514_000_000);
   });
 
-  it("rewrites covered stored cells to the corrected lower counts", () => {
+  it("does not lower a stored cell on a lower snapshot alone", () => {
+    // A lower total is not evidence: a database that failed to open or
+    // history deleted locally lowers it just the same. Without a proof the
+    // transition is the ordinary preserving baseline.
     const plan = devinPlan(inflatedStored, correctedScan);
 
-    expect(plan.mode).toBe("recount");
+    expect(plan.mode).toBe("baseline-legacy");
+    expect(plan.recountDays).toBeUndefined();
     expect(plan.increments).toEqual({});
-    expect(plan.layoutDays?.["2026-10-07"]?.tokens).toBe(234_000_000);
-    expect(plan.layoutDays?.["2026-10-08"]?.tokens).toBe(455_000_000);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(1_000_000_000);
+    expect(plan.nextState?.aggregate.tokens).toBe(1_514_000_000);
+  });
+
+  it("subtracts exactly the proven over-count from covered legacy cells", () => {
+    const plan = devinPlan(inflatedStored, correctedScan, { recountProof: fullProof });
+
+    expect(plan.mode).toBe("baseline-legacy");
+    expect(plan.recountDays).toEqual(["2026-10-07", "2026-10-08"]);
+    expect(plan.rejectedRecountDays).toBeUndefined();
+    expect(plan.increments).toEqual({});
+    expect(plan.nextState?.days["2026-10-07"]?.tokens).toBe(234_000_000);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(455_000_000);
+    expect(plan.nextState?.days["2026-10-08"]?.models["swe-2-high"].tokens).toBe(
+      455_000_000
+    );
     expect(plan.nextState?.aggregate.tokens).toBe(689_000_000);
   });
 
-  it("keeps stored cells on days the recounting snapshot does not report", () => {
-    const legacyWithExtraDay = devinSnapshot(
-      devinContribution("2026-10-06", 88_000_000),
-      devinContribution("2026-10-07", 514_000_000),
-      devinContribution("2026-10-08", 1_000_000_000)
-    );
+  it("keeps stored usage the proof does not describe", () => {
+    // Two local databases fed the stored day (A = 400 with 50 duplicate
+    // rows, B = 600). This scan read only A: B contributes to neither side of
+    // the proof, so only A's 50 duplicates come off and B's 600 stay. Replacing
+    // the cell with the 350 the scan reports would delete B outright.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
+    const scan = devinSnapshot(devinContribution("2026-10-08", 350));
+    const plan = devinPlan(stored, scan, {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(400), corrected: proofCell(350) },
+      }),
+    });
 
-    const plan = devinPlan(legacyWithExtraDay, correctedScan);
-
-    expect(plan.mode).toBe("recount");
-    // The uncovered day stays out of the rewrite layout...
-    expect(plan.layoutDays?.["2026-10-06"]).toBeUndefined();
-    // ...but remains in the credited ledger, since the route keeps the row.
-    expect(plan.nextState?.days["2026-10-06"]?.tokens).toBe(88_000_000);
-    expect(plan.nextState?.aggregate.tokens).toBe(777_000_000);
+    expect(plan.mode).toBe("baseline-legacy");
+    expect(plan.recountDays).toEqual(["2026-10-08"]);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(950);
+    expect(plan.nextState?.aggregate.tokens).toBe(950);
   });
 
-  it("closes the guard again after the one-time recount", () => {
-    const state = devinPlan(inflatedStored, correctedScan).nextState!;
+  it("heals the rest once the missing source is read again", () => {
+    // Continuing from the A-only scan above (ledger 950): B becomes readable
+    // and carries 60 duplicates of its own. The proof now covers both, and
+    // the subtraction stops at the corrected count, so A's duplicates are not
+    // taken off a second time.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
+    const first = devinPlan(stored, devinSnapshot(devinContribution("2026-10-08", 350)), {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(400), corrected: proofCell(350) },
+      }),
+    });
+    expect(first.nextState?.days["2026-10-08"]?.tokens).toBe(950);
 
-    // An even lower same-generation snapshot cannot lower credited days a
-    // second time: the monotonic incremental ledger applies from here on.
+    const second = devinPlan({}, devinSnapshot(devinContribution("2026-10-08", 890)), {
+      state: first.nextState,
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(1_000), corrected: proofCell(890) },
+      }),
+    });
+
+    expect(second.mode).toBe("incremental");
+    expect(second.recountDays).toEqual(["2026-10-08"]);
+    expect(second.nextState?.days["2026-10-08"]?.tokens).toBe(890);
+    expect(second.nextState?.aggregate.tokens).toBe(890);
+  });
+
+  it("never lowers a cell below the corrected count and lets growth raise it", () => {
+    // Stored 1,000 = 900 real + 100 duplicate rows. Since then 180 new tokens
+    // arrived whose rows carry 20 duplicates of their own. The proven
+    // over-count is 120, but the stored cell is already below the corrected
+    // 1,080, so nothing is subtracted and the growth allocation credits the
+    // 80 the stored cell lacks.
+    const stored = devinSnapshot(devinContribution("2026-10-08", 1_000));
+    const scan = devinSnapshot(devinContribution("2026-10-08", 1_080));
+    const plan = devinPlan(stored, scan, {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(1_200), corrected: proofCell(1_080) },
+      }),
+    });
+
+    expect(plan.mode).toBe("baseline-legacy");
+    expect(plan.increments["2026-10-08"]?.tokens).toBe(80);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(1_080);
+  });
+
+  it("is idempotent when the same corrected snapshot is replayed", () => {
+    const state = devinPlan(inflatedStored, correctedScan, {
+      recountProof: fullProof,
+    }).nextState!;
+
+    const replay = devinPlan({}, correctedScan, { state, recountProof: fullProof });
+
+    expect(replay.mode).toBe("incremental");
+    expect(replay.increments).toEqual({});
+    expect(replay.highWaterDeficit).toBeUndefined();
+    expect(replay.nextState?.aggregate.tokens).toBe(689_000_000);
+    expect(replay.nextState?.days["2026-10-08"]?.tokens).toBe(455_000_000);
+  });
+
+  it("keeps the guard closed for a lower snapshot without a matching proof", () => {
+    const state = devinPlan(inflatedStored, correctedScan, {
+      recountProof: fullProof,
+    }).nextState!;
+
+    // A proof for a smaller snapshot cannot lower the day below what it
+    // itself calls corrected, and the ledger is already there.
     const lower = devinPlan(
       {},
       devinSnapshot(devinContribution("2026-10-08", 100_000_000)),
-      state
+      {
+        state,
+        recountProof: proof({
+          "2026-10-08": {
+            previous: proofCell(100_000_000),
+            corrected: proofCell(100_000_000),
+          },
+        }),
+      }
     );
     expect(lower.mode).toBe("incremental");
     expect(lower.highWaterDeficit).toBeGreaterThan(0);
     expect(lower.increments["2026-10-08"]).toBeUndefined();
+    expect(lower.nextState?.days["2026-10-08"]?.tokens).toBe(455_000_000);
 
-    // Real growth on top of the recounted baseline is still credited.
+    // Real growth on top of the corrected baseline is still credited.
     const grown = devinPlan(
       {},
       devinSnapshot(
@@ -1658,10 +1786,116 @@ describe("devin-cli recount", () => {
         devinContribution("2026-10-08", 455_000_000),
         devinContribution("2026-10-09", 11_000_000)
       ),
-      state
+      { state, recountProof: fullProof }
     );
     expect(grown.mode).toBe("incremental");
     expect(grown.nextState?.aggregate.tokens).toBe(700_000_000);
+  });
+
+  it("rejects a proof that does not describe the submitted snapshot", () => {
+    // The corrected side must reproduce the submitted cell field by field;
+    // otherwise the proof was computed from different rows than the
+    // snapshot and proves nothing about it.
+    const plan = devinPlan(inflatedStored, correctedScan, {
+      recountProof: proof({
+        "2026-10-07": { previous: proofCell(514_000_000), corrected: proofCell(234_000_000) },
+        "2026-10-08": { previous: proofCell(1_000_000_000), corrected: proofCell(400_000_000) },
+      }),
+    });
+
+    expect(plan.recountDays).toEqual(["2026-10-07"]);
+    expect(plan.rejectedRecountDays).toEqual(["2026-10-08"]);
+    expect(plan.nextState?.days["2026-10-07"]?.tokens).toBe(234_000_000);
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(1_000_000_000);
+  });
+
+  it("rejects a proof whose previous count is below its corrected count", () => {
+    const plan = devinPlan(inflatedStored, correctedScan, {
+      recountProof: proof({
+        "2026-10-08": { previous: proofCell(455_000_000), corrected: proofCell(455_000_001) },
+      }),
+    });
+
+    expect(plan.recountDays).toBeUndefined();
+    expect(plan.rejectedRecountDays).toEqual(["2026-10-08"]);
+  });
+
+  it("rejects a proof naming a model the snapshot does not report, and vice versa", () => {
+    const mismatchedModel = devinPlan(inflatedStored, correctedScan, {
+      recountProof: proof({
+        "2026-10-08": {
+          previous: proofCell(1_000_000_000),
+          corrected: proofCell(455_000_000),
+          modelId: "swe-2-low",
+        },
+      }),
+    });
+    expect(mismatchedModel.rejectedRecountDays).toEqual(["2026-10-08"]);
+
+    const partialModels = devinPlan(
+      inflatedStored,
+      devinSnapshot(
+        devinContribution("2026-10-08", 400_000_000),
+        devinContribution("2026-10-08", 55_000_000, "swe-2-low")
+      ),
+      {
+        recountProof: proof({
+          "2026-10-08": { previous: proofCell(900_000_000), corrected: proofCell(400_000_000) },
+        }),
+      }
+    );
+    expect(partialModels.rejectedRecountDays).toEqual(["2026-10-08"]);
+  });
+
+  it("ignores a recount proof from a client that does not ship one", () => {
+    const plan = planParserHighWaterSubmission({
+      client: "copilot",
+      incomingVersion: SUPPORTED_VERSIONED_PARSERS.copilot,
+      fullHistory: true,
+      existingLegacyDays: foldParserClientSnapshot(
+        [contribution("2026-10-08", 1_000)],
+        "copilot"
+      ),
+      incomingDays: foldParserClientSnapshot([contribution("2026-10-08", 400)], "copilot"),
+      recountProof: {
+        "2026-10-08": {
+          "model-a": { previous: proofCell(1_000), corrected: proofCell(400) },
+        },
+      },
+    });
+
+    expect(plan.recountDays).toBeUndefined();
+    expect(plan.rejectedRecountDays).toBeUndefined();
+    expect(plan.nextState?.days["2026-10-08"]?.tokens).toBe(1_000);
+  });
+
+  it("corrects cost only down to the corrected cost and keeps the stored tags", () => {
+    const stored: ClientBreakdownData = {
+      ...devinSnapshot(devinContribution("2026-10-08", 3_000, "swe-2-high", 30))["2026-10-08"],
+    };
+    stored.provenance = { ...stored.provenance!, costIsComplete: false, origin: "cli" };
+    const proofDay = proof({
+      "2026-10-08": { previous: proofCell(3_000, 30), corrected: proofCell(1_200, 8) },
+    })["2026-10-08"];
+
+    const exact = applyRecountProofToCell(stored, proofDay);
+    expect(exact.cell.tokens).toBe(1_200);
+    expect(exact.cell.cost).toBeCloseTo(8, 4);
+    expect(exact.cell.models["swe-2-high"].cost).toBeCloseTo(8, 4);
+    expect(exact.removed).toEqual({ tokens: 1_800, cost: 22, messages: 0 });
+    // Amounts are restated; where they came from and whether their cost was
+    // fully priced is not.
+    expect(exact.cell.provenance?.costIsComplete).toBe(false);
+    expect(exact.cell.provenance?.origin).toBe("cli");
+
+    // A stored cost already partly corrected stops at the corrected cost
+    // rather than taking the full proven difference off again.
+    const partlyCorrected = { ...stored, cost: 15, models: { "swe-2-high": { ...stored.models["swe-2-high"], cost: 15 } } };
+    expect(applyRecountProofToCell(partlyCorrected, proofDay).cell.cost).toBeCloseTo(8, 4);
+
+    // A stored cost below the corrected cost is not touched.
+    const belowCorrected = { ...stored, cost: 5, models: { "swe-2-high": { ...stored.models["swe-2-high"], cost: 5 } } };
+    expect(applyRecountProofToCell(belowCorrected, proofDay).cell.cost).toBeCloseTo(5, 4);
   });
 
   it("keeps generation-1 submissions compatible before the transition", () => {
@@ -1681,7 +1915,9 @@ describe("devin-cli recount", () => {
   });
 
   it("freezes generation 1 after the generation-2 transition starts", () => {
-    const state = devinPlan(inflatedStored, correctedScan).nextState!;
+    const state = devinPlan(inflatedStored, correctedScan, {
+      recountProof: fullProof,
+    }).nextState!;
     const plan = planParserHighWaterSubmission({
       client: "devin-cli",
       incomingVersion: 1,
@@ -1696,41 +1932,52 @@ describe("devin-cli recount", () => {
     expect(plan.nextState).toBeUndefined();
   });
 
-  it("does not let a partial snapshot recount away covered days", () => {
+  it("does not let a partial snapshot correct anything", () => {
     const partial = planParserHighWaterSubmission({
       client: "devin-cli",
       incomingVersion: SUPPORTED_VERSIONED_PARSERS["devin-cli"],
       fullHistory: false,
       existingLegacyDays: inflatedStored,
-      incomingDays: devinSnapshot(devinContribution("2026-10-08", 1)),
+      incomingDays: devinSnapshot(devinContribution("2026-10-08", 455_000_000)),
+      recountProof: fullProof,
     });
 
     expect(partial.mode).toBe("freeze");
+    expect(partial.recountDays).toBeUndefined();
     expect(partial.nextState?.baselineEstablished).toBe(false);
 
     // The pending state must not close the transition: a later full-history
-    // snapshot at the registered generation still gets its recount.
-    const followed = devinPlan(inflatedStored, correctedScan, partial.nextState);
-    expect(followed.mode).toBe("recount");
+    // snapshot at the registered generation still applies its proof.
+    const followed = devinPlan(inflatedStored, correctedScan, {
+      state: partial.nextState,
+      recountProof: fullProof,
+    });
+    expect(followed.mode).toBe("baseline-legacy");
+    expect(followed.nextState?.aggregate.tokens).toBe(689_000_000);
   });
 
-  it("does not burn the one-time recount on an empty client snapshot", () => {
+  it("keeps the transition pending on an empty client snapshot", () => {
     const empty = devinPlan(inflatedStored, {});
 
     // A default all-client submit declares every default parser even when this
-    // client produced no rows. Keep the transition pending so a missing,
-    // unreadable, or removed Devin database cannot consume the only recount.
+    // client produced no rows. A missing, unreadable, or removed Devin database
+    // must not baseline the inflated legacy rows as this generation's ledger.
     expect(empty.mode).toBe("freeze");
     expect(empty.nextState?.baselineEstablished).toBe(false);
 
-    const followed = devinPlan(inflatedStored, correctedScan, empty.nextState);
-    expect(followed.mode).toBe("recount");
+    const followed = devinPlan(inflatedStored, correctedScan, {
+      state: empty.nextState,
+      recountProof: fullProof,
+    });
+    expect(followed.mode).toBe("baseline-legacy");
+    expect(followed.nextState?.aggregate.tokens).toBe(689_000_000);
   });
 
   it("baselines normally when no inflated history is stored", () => {
-    const plan = devinPlan({}, correctedScan);
+    const plan = devinPlan({}, correctedScan, { recountProof: fullProof });
 
     expect(plan.mode).toBe("baseline-new");
+    expect(plan.recountDays).toEqual(["2026-10-07", "2026-10-08"]);
     expect(plan.nextState?.aggregate.tokens).toBe(689_000_000);
   });
 });

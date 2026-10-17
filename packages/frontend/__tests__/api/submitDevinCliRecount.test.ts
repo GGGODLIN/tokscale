@@ -12,10 +12,12 @@ import type { ClientBreakdownData } from "../../src/lib/db/helpers";
 // (day, client) cell against a decrease, so on its own the inflated cells are
 // locked in forever.
 //
-// The recounting-generation plan (`RECOUNTING_GENERATION_CLIENTS`) gets one
-// rewrite at the transition: covered stored cells adopt the snapshot's values
-// outright, uncovered stored days are preserved, and the ledger returns to
-// the monotonic incremental path for every submit after.
+// A lower snapshot alone is not evidence (a database that failed to open
+// lowers it too), so the generation-2 CLI ships a per-day recount proof: what
+// generation 1 counted from the same rows next to what generation 2 counts.
+// The route subtracts only that proven over-count from each stored cell,
+// never below the corrected count and never from usage the proof does not
+// describe, on every full-history submit (`RECOUNT_PROOF_CLIENTS`).
 //
 // This is a route harness in the style of submitAntigravityCliHighWater: it
 // runs the real merge/high-water code against a stateful transaction double
@@ -428,12 +430,59 @@ function installTx(store: Store) {
   );
 }
 
+type BodyDay = {
+  date: string;
+  tokens: number;
+  cost?: number;
+  /**
+   * What parser generation 1 counted for this day from the same rows. When
+   * present, the body carries a recount proof entry for the day whose
+   * `corrected` side is exactly the submitted cell.
+   */
+  previous?: { tokens: number; cost?: number; messages?: number };
+  /** Overrides the proof's corrected side, to model a proof built from other rows. */
+  provenCorrected?: { tokens: number; cost?: number; messages?: number };
+};
+
+function proofCell(tokens: number, cost: number, messages: number) {
+  return {
+    tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+    cost,
+    messages,
+  };
+}
+
 function submissionBody(
-  days: Array<{ date: string; tokens: number; cost?: number }>,
+  days: BodyDay[],
   options: { version?: number; fullHistory?: boolean; costIsComplete?: boolean } = {},
 ) {
   const version = options.version ?? SUPPORTED_VERSIONED_PARSERS["devin-cli"];
   const dates = days.map((day) => day.date).sort();
+  const dayCost = (day: BodyDay) => day.cost ?? day.tokens / 1000;
+  const proofDays = Object.fromEntries(
+    days
+      .filter((day) => day.previous)
+      .map((day) => {
+        const corrected = day.provenCorrected ?? { tokens: day.tokens, cost: dayCost(day), messages: 1 };
+        return [
+          day.date,
+          {
+            "swe-2-high": {
+              previous: proofCell(
+                day.previous!.tokens,
+                day.previous!.cost ?? day.previous!.tokens / 1000,
+                day.previous!.messages ?? 1,
+              ),
+              corrected: proofCell(
+                corrected.tokens,
+                corrected.cost ?? corrected.tokens / 1000,
+                corrected.messages ?? 1,
+              ),
+            },
+          },
+        ];
+      }),
+  );
   return {
     device: { id: "dev_1", name: "Device one" },
     meta: {
@@ -444,6 +493,9 @@ function submissionBody(
     scanScope: {
       parserVersions: { "devin-cli": version },
       fullHistory: options.fullHistory ?? true,
+      ...(Object.keys(proofDays).length > 0
+        ? { recountProofs: { "devin-cli": proofDays } }
+        : {}),
     },
     summary: { clients: ["devin-cli"] },
     years: [],
@@ -451,7 +503,7 @@ function submissionBody(
       date: day.date,
       totals: {
         tokens: day.tokens,
-        cost: day.cost ?? day.tokens / 1000,
+        cost: dayCost(day),
         messages: 1,
         costIsComplete: options.costIsComplete ?? true,
       },
@@ -466,7 +518,7 @@ function submissionBody(
             cacheWrite: 0,
             reasoning: 0,
           },
-          cost: day.cost ?? day.tokens / 1000,
+          cost: dayCost(day),
           messages: 1,
         },
       ],
@@ -505,6 +557,15 @@ async function post(body: object) {
   );
 }
 
+async function submit(store: Store, body: ReturnType<typeof submissionBody>) {
+  installTx(store);
+  mockSubmit(body);
+  const response = await post(body);
+  const json = await response.json();
+  expect(response.status).toBe(200);
+  return json as { warnings?: string[]; metrics: { totalTokens: number } };
+}
+
 // What the inflated generation-1 submissions left in the device: each day
 // counts duplicate `message_nodes` rows, roughly 2.2x the real usage. A third
 // stored day has no local data left, so no corrected snapshot reports it.
@@ -513,9 +574,11 @@ const INFLATED_DAYS = [
   { date: "2026-10-07", tokens: 514_000_000, cost: 514 },
   { date: "2026-10-08", tokens: 1_000_000_000, cost: 1000 },
 ];
-const CORRECTED_SCAN = [
-  { date: "2026-10-07", tokens: 234_000_000, cost: 234 },
-  { date: "2026-10-08", tokens: 455_000_000, cost: 455 },
+// The generation-2 scan of the same rows, with the proof of what generation 1
+// counted from them.
+const CORRECTED_SCAN: BodyDay[] = [
+  { date: "2026-10-07", tokens: 234_000_000, cost: 234, previous: { tokens: 514_000_000, cost: 514 } },
+  { date: "2026-10-08", tokens: 455_000_000, cost: 455, previous: { tokens: 1_000_000_000, cost: 1000 } },
 ];
 
 function seedInflatedDays(store: Store) {
@@ -524,113 +587,131 @@ function seedInflatedDays(store: Store) {
   }
 }
 
-describe("POST /api/submit devin-cli recount", () => {
+describe("POST /api/submit devin-cli recount proof", () => {
   it("registers devin-cli at the generation the deduplicating CLI declares", () => {
-    // Generation 2 is the request_id recount. Registering 1 would recount on
-    // every still-inflating submission; registering above 2 freezes the only
-    // CLI that can heal the stored rows.
+    // Generation 2 is the request_id recount. Registering 1 would accept
+    // proofs from a generation that never computes them; registering above 2
+    // freezes the only CLI that can heal the stored rows.
     expect(SUPPORTED_VERSIONED_PARSERS["devin-cli"]).toBe(2);
   });
 
-  it("lowers covered stored cells to the recounted values and keeps uncovered days", async () => {
+  it("subtracts the proven over-count from covered stored cells and keeps uncovered days", async () => {
     const store = newStore();
     seedInflatedDays(store);
 
-    installTx(store);
-    const body = submissionBody(CORRECTED_SCAN);
-    mockSubmit(body);
-    const response = await post(body);
-    const json = await response.json();
+    const json = await submit(store, submissionBody(CORRECTED_SCAN));
 
-    expect(response.status).toBe(200);
-    // Covered days adopt the snapshot outright, even though both decreased.
+    // Covered days drop by exactly what the proof shows generation 1 double
+    // counted, which here lands them on the snapshot.
     expect(storedClientTokens(store, "2026-10-07", "devin-cli")).toBe(234_000_000);
     expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(455_000_000);
     // The day the snapshot does not report is kept at its stored value.
     expect(storedClientTokens(store, "2026-10-06", "devin-cli")).toBe(88_000_000);
     expect(storedTokens(store)).toBe(777_000_000);
+    expect(storedCost(store)).toBeCloseTo(777, 4);
     expect(json.metrics.totalTokens).toBe(777_000_000);
-    // Model-level cells were rewritten too.
+    // Model-level cells were corrected too.
     const day8 = store.days.find((day) => day.date === "2026-10-08")!;
-    expect(day8.sourceBreakdown["devin-cli"].models["swe-2-high"].tokens).toBe(
-      455_000_000,
-    );
+    expect(day8.sourceBreakdown["devin-cli"].models["swe-2-high"].tokens).toBe(455_000_000);
+    expect(day8.sourceBreakdown["devin-cli"].provenance?.costIsComplete).toBeUndefined();
     // The transition stamped the persisted generation.
     expect(store.device.parserVersions["devin-cli"]).toBe(2);
-    expect(json.warnings?.some((warning: string) => warning.includes("Recounted"))).toBe(true);
+    expect(json.warnings?.some((warning) => warning.includes("Corrected Devin CLI history on 2 day(s)"))).toBe(true);
+  });
+
+  it("does not lower a stored day on a lower snapshot without a proof", async () => {
+    const store = newStore();
+    seedInflatedDays(store);
+
+    await submit(
+      store,
+      submissionBody(CORRECTED_SCAN.map(({ date, tokens, cost }) => ({ date, tokens, cost }))),
+    );
+
+    // A generation number is identity, not evidence: a lower total could as
+    // well be a database that failed to open. The ordinary preserving
+    // baseline applies.
+    expect(storedTokens(store)).toBe(1_602_000_000);
+    expect(store.device.parserVersions["devin-cli"]).toBe(2);
+  });
+
+  it("keeps stored usage from a source the scan could not read", async () => {
+    // Two Devin databases fed the stored day: A = 400 tokens of which 50 are
+    // duplicate rows, B = 600. Generation 2 reads A while B fails to open, so
+    // the payload carries 350 for the date. Only A's proven 50 come off.
+    const store = newStore();
+    seedDay(store, "2026-10-08", { "devin-cli": devinCell(1_000, 1) });
+
+    await submit(
+      store,
+      submissionBody([
+        { date: "2026-10-08", tokens: 350, cost: 0.35, previous: { tokens: 400, cost: 0.4 } },
+      ]),
+    );
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(950);
+
+    // When B is readable again (with 60 duplicates of its own) the proof
+    // covers both databases and the day heals to the truth, without taking
+    // A's duplicates off a second time.
+    await submit(
+      store,
+      submissionBody([
+        { date: "2026-10-08", tokens: 890, cost: 0.89, previous: { tokens: 1_000, cost: 1 } },
+      ]),
+    );
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(890);
+    expect(storedCost(store)).toBeCloseTo(0.89, 4);
   });
 
   it("keeps generation-1 submissions compatible before the transition", async () => {
     const store = newStore();
     seedInflatedDays(store);
 
-    installTx(store);
-    const body = submissionBody(
-      [{ date: "2026-10-08", tokens: 2_000_000_000, cost: 2000 }],
-      { version: 1 },
+    const json = await submit(
+      store,
+      submissionBody([{ date: "2026-10-08", tokens: 2_000_000_000, cost: 2000 }], { version: 1 }),
     );
-    mockSubmit(body);
-    const response = await post(body);
-    const json = await response.json();
 
-    expect(response.status).toBe(200);
     // The receiver reaches production before a generation-2 CLI release. An
     // installed generation-1 CLI must retain the pre-deploy merge behavior
     // until this device starts its transition.
     expect(storedTokens(store)).toBe(2_602_000_000);
     expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(2_000_000_000);
     expect(store.device.parserVersions["devin-cli"]).toBeUndefined();
-    expect(
-      (json.warnings ?? []).some((warning: string) => warning.includes("Ignored")),
-    ).toBe(false);
+    expect((json.warnings ?? []).some((warning) => warning.includes("Ignored"))).toBe(false);
   });
 
   it("freezes generation 1 after the generation-2 transition", async () => {
     const store = newStore();
     seedInflatedDays(store);
 
-    installTx(store);
-    const transition = submissionBody(CORRECTED_SCAN);
-    mockSubmit(transition);
-    expect((await post(transition)).status).toBe(200);
+    await submit(store, submissionBody(CORRECTED_SCAN));
     expect(storedTokens(store)).toBe(777_000_000);
 
-    installTx(store);
-    const old = submissionBody(
-      [{ date: "2026-10-08", tokens: 2_000_000_000, cost: 2000 }],
-      { version: 1 },
+    const json = await submit(
+      store,
+      submissionBody([{ date: "2026-10-08", tokens: 2_000_000_000, cost: 2000 }], { version: 1 }),
     );
-    mockSubmit(old);
-    const response = await post(old);
-    const json = await response.json();
 
-    expect(response.status).toBe(200);
     expect(storedTokens(store)).toBe(777_000_000);
     expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(455_000_000);
     expect(store.device.parserVersions["devin-cli"]).toBe(2);
-    expect(json.warnings?.some((warning: string) => warning.includes("Ignored"))).toBe(true);
+    expect(json.warnings?.some((warning) => warning.includes("Ignored"))).toBe(true);
   });
 
-  it("keeps a declared but empty Devin transition pending until meaningful history arrives", async () => {
+  it("keeps a declared but empty Devin transition pending until history arrives", async () => {
     const store = newStore();
     seedInflatedDays(store);
 
     // Default submits declare every default parser. Model that real payload:
     // another client has data, while Devin is declared at generation 2 but
     // contributes no rows because its local database is absent or unreadable.
-    installTx(store);
-    const declaredOnly = submissionBody([
-      { date: "2026-10-08", tokens: 50, cost: 0.05 },
-    ]);
+    const declaredOnly = submissionBody([{ date: "2026-10-08", tokens: 50, cost: 0.05 }]);
     declaredOnly.summary.clients = ["claude"];
     declaredOnly.contributions[0].clients[0].client = "claude";
-    mockSubmit(declaredOnly);
-    const emptyResponse = await post(declaredOnly);
+    await submit(store, declaredOnly);
 
-    expect(emptyResponse.status).toBe(200);
-    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(
-      1_000_000_000,
-    );
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(1_000_000_000);
     expect(store.device.parserVersions["devin-cli"]).toBe(2);
     expect(
       (store.device.parserStates["devin-cli"] as { baselineEstablished?: boolean })
@@ -638,30 +719,15 @@ describe("POST /api/submit devin-cli recount", () => {
     ).toBe(false);
 
     // Once a generation-2 transition is pending, an old autosubmit binary may
-    // not inflate the device while it waits for meaningful generation-2 data.
-    installTx(store);
-    const old = submissionBody(
-      [{ date: "2026-10-08", tokens: 2_000_000_000, cost: 2000 }],
-      { version: 1 },
+    // not inflate the device while it waits for generation-2 data.
+    await submit(
+      store,
+      submissionBody([{ date: "2026-10-08", tokens: 2_000_000_000, cost: 2000 }], { version: 1 }),
     );
-    mockSubmit(old);
-    const oldResponse = await post(old);
-    expect(oldResponse.status).toBe(200);
-    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(
-      1_000_000_000,
-    );
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(1_000_000_000);
 
-    // The first snapshot that actually carries Devin history gets the one
-    // recount. Replaying it is idempotent and cannot spend the transition again.
-    installTx(store);
-    const corrected = submissionBody(CORRECTED_SCAN);
-    mockSubmit(corrected);
-    expect((await post(corrected)).status).toBe(200);
-    expect(storedTokens(store)).toBe(777_000_050);
-
-    installTx(store);
-    mockSubmit(corrected);
-    expect((await post(corrected)).status).toBe(200);
+    // The first snapshot that actually carries Devin history applies its proof.
+    await submit(store, submissionBody(CORRECTED_SCAN));
     expect(storedTokens(store)).toBe(777_000_050);
   });
 
@@ -669,126 +735,120 @@ describe("POST /api/submit devin-cli recount", () => {
     const store = newStore();
     seedInflatedDays(store);
 
-    installTx(store);
-    const partial = submissionBody(
-      [{ date: "2026-10-08", tokens: 1, cost: 0.001 }],
-      { fullHistory: false },
+    await submit(
+      store,
+      submissionBody(
+        [{ date: "2026-10-08", tokens: 1, cost: 0.001, previous: { tokens: 1_000_000_000 } }],
+        { fullHistory: false },
+      ),
     );
-    mockSubmit(partial);
-    expect((await post(partial)).status).toBe(200);
     expect(storedTokens(store)).toBe(1_602_000_000);
     expect(
       (store.device.parserStates["devin-cli"] as { baselineEstablished?: boolean })
         .baselineEstablished,
     ).toBe(false);
 
-    installTx(store);
-    const corrected = submissionBody(CORRECTED_SCAN);
-    mockSubmit(corrected);
-    expect((await post(corrected)).status).toBe(200);
+    await submit(store, submissionBody(CORRECTED_SCAN));
     expect(storedTokens(store)).toBe(777_000_000);
   });
 
-  it("does not recount a second time once the transition state persists", async () => {
+  it("replays the same corrected snapshot idempotently", async () => {
     const store = newStore();
     seedInflatedDays(store);
 
-    installTx(store);
-    const first = submissionBody(CORRECTED_SCAN);
-    mockSubmit(first);
-    expect((await post(first)).status).toBe(200);
+    await submit(store, submissionBody(CORRECTED_SCAN));
     expect(storedTokens(store)).toBe(777_000_000);
 
-    // A second generation-2 full snapshot at an even lower total enters the
-    // incremental ledger: the credited high-water is the recounted baseline.
-    installTx(store);
-    const second = submissionBody([
-      { date: "2026-10-08", tokens: 100_000_000, cost: 100 },
-    ]);
-    mockSubmit(second);
-    const secondResponse = await post(second);
-    const secondJson = await secondResponse.json();
-
-    expect(secondResponse.status).toBe(200);
+    const json = await submit(store, submissionBody(CORRECTED_SCAN));
     expect(storedTokens(store)).toBe(777_000_000);
-    expect(secondJson.warnings?.some((warning: string) =>
-      warning.includes("fewer tokens than this device's credited baseline"),
-    )).toBe(true);
+    expect(storedCost(store)).toBeCloseTo(777, 4);
+    // Nothing left to remove, so nothing is reported as corrected.
+    expect((json.warnings ?? []).some((warning) => warning.includes("Corrected"))).toBe(false);
   });
 
   it("suppresses new growth while the scan sits below the credited baseline, then credits the excess", async () => {
     const store = newStore();
     seedInflatedDays(store);
 
-    installTx(store);
-    const first = submissionBody(CORRECTED_SCAN);
-    mockSubmit(first);
-    expect((await post(first)).status).toBe(200);
+    await submit(store, submissionBody(CORRECTED_SCAN));
     expect(storedTokens(store)).toBe(777_000_000);
 
     // The preserved 10-06 day (88M) stays in the credited ledger, but the
     // scanner no longer reports it, so the scan's lifetime (700M) is below
     // the credited baseline (777M): growth on a brand-new day is suppressed
     // until the scan exceeds it — the same monotonic rule as before.
-    installTx(store);
-    const second = submissionBody([
-      ...CORRECTED_SCAN,
-      { date: "2026-10-09", tokens: 11_000_000, cost: 11 },
-    ]);
-    mockSubmit(second);
-    expect((await post(second)).status).toBe(200);
+    await submit(
+      store,
+      submissionBody([...CORRECTED_SCAN, { date: "2026-10-09", tokens: 11_000_000, cost: 11 }]),
+    );
     expect(storedClientTokens(store, "2026-10-09", "devin-cli")).toBeUndefined();
     expect(storedTokens(store)).toBe(777_000_000);
 
     // Once the scan's lifetime exceeds the credited baseline, the excess is
     // credited newest-first; the 10-09 cell has the only positive capacity.
-    installTx(store);
-    const third = submissionBody([
-      ...CORRECTED_SCAN,
-      { date: "2026-10-09", tokens: 101_000_000, cost: 101 },
-    ]);
-    mockSubmit(third);
-    expect((await post(third)).status).toBe(200);
+    await submit(
+      store,
+      submissionBody([...CORRECTED_SCAN, { date: "2026-10-09", tokens: 101_000_000, cost: 101 }]),
+    );
     expect(storedClientTokens(store, "2026-10-09", "devin-cli")).toBe(13_000_000);
     expect(storedTokens(store)).toBe(790_000_000);
   });
 
-  it("keeps the client's stored lifetime cost when the recounting snapshot is incomplete", async () => {
+  it("ignores a proof that does not describe the submitted snapshot", async () => {
     const store = newStore();
-    // Small numbers keep the floor math readable: stored lifetime $60, of
-    // which $10 sits on the uncovered day and must not be re-added to the
-    // covered cells the recount rewrites.
+    seedInflatedDays(store);
+
+    const json = await submit(
+      store,
+      submissionBody([
+        CORRECTED_SCAN[0],
+        { ...CORRECTED_SCAN[1], provenCorrected: { tokens: 400_000_000 } },
+      ]),
+    );
+
+    expect(storedClientTokens(store, "2026-10-07", "devin-cli")).toBe(234_000_000);
+    expect(storedClientTokens(store, "2026-10-08", "devin-cli")).toBe(1_000_000_000);
+    expect(json.warnings?.some((warning) => warning.includes("Ignored the Devin CLI recount proof for 1 day(s)"))).toBe(true);
+  });
+
+  it("floors cost on an incomplete recount, then corrects it exactly on the next complete snapshot", async () => {
+    const store = newStore();
+    // Stored lifetime $60: $10 on the uncovered day, $20 and $30 on the two
+    // the corrected scan reports.
     seedDay(store, "2026-10-06", { "devin-cli": devinCell(1_000, 10) });
     seedDay(store, "2026-10-07", { "devin-cli": devinCell(2_000, 20) });
     seedDay(store, "2026-10-08", { "devin-cli": devinCell(3_000, 30) });
+    const corrected: BodyDay[] = [
+      { date: "2026-10-07", tokens: 900, cost: 5, previous: { tokens: 2_000, cost: 20 } },
+      { date: "2026-10-08", tokens: 1_200, cost: 8, previous: { tokens: 3_000, cost: 30 } },
+    ];
 
-    installTx(store);
-    const body = submissionBody(
-      [
-        { date: "2026-10-07", tokens: 900, cost: 5 },
-        { date: "2026-10-08", tokens: 1200, cost: 8 },
-      ],
-      { costIsComplete: false },
-    );
-    mockSubmit(body);
-    const response = await post(body);
+    await submit(store, submissionBody(corrected, { costIsComplete: false }));
 
-    expect(response.status).toBe(200);
-    // Tokens are recounted down; the incomplete snapshot may not lower the
-    // credited lifetime cost, so the covered cells' $13 is topped up with the
-    // $37 deficit to reach their $50 share of the floor, while the preserved
-    // day's $10 is counted exactly once.
+    // Tokens are corrected; the incomplete snapshot may not lower the stored
+    // cost, so each covered cell keeps its stored cost as a floor and is
+    // tagged, while the uncovered day is untouched.
     expect(storedTokens(store)).toBe(1_000 + 900 + 1_200);
     expect(storedCost(store)).toBeCloseTo(60, 4);
     for (const date of ["2026-10-07", "2026-10-08"]) {
-      const cell = store.days.find((day) => day.date === date)!
-        .sourceBreakdown["devin-cli"];
+      const cell = store.days.find((day) => day.date === date)!.sourceBreakdown["devin-cli"];
       expect(cell.provenance?.costIsComplete).toBe(false);
+      expect(cell.models["swe-2-high"].cost).toBeCloseTo(cell.cost, 4);
     }
-    // The incomplete floor lands on nested model costs, not just the client
-    // aggregate, so model-level reads agree with the client total.
+
+    // The same layout with complete pricing restates each covered cell's
+    // cost: the proven over-count comes off and the tag clears, so the
+    // duplicate-derived cost inflation does not become permanent.
+    await submit(store, submissionBody(corrected, { costIsComplete: true }));
+
+    expect(storedTokens(store)).toBe(1_000 + 900 + 1_200);
+    expect(storedCost(store)).toBeCloseTo(10 + 5 + 8, 4);
+    for (const date of ["2026-10-07", "2026-10-08"]) {
+      const cell = store.days.find((day) => day.date === date)!.sourceBreakdown["devin-cli"];
+      expect(cell.provenance?.costIsComplete).toBeUndefined();
+      expect(cell.models["swe-2-high"].cost).toBeCloseTo(cell.cost, 4);
+    }
     const day8 = store.days.find((day) => day.date === "2026-10-08")!;
-    const devin8 = day8.sourceBreakdown["devin-cli"];
-    expect(devin8.models["swe-2-high"].cost).toBeCloseTo(devin8.cost, 4);
+    expect(day8.sourceBreakdown["devin-cli"].cost).toBeCloseTo(8, 4);
   });
 });
