@@ -150,6 +150,62 @@ pub fn load_devin_desktop_session_lookup(
     lookup
 }
 
+/// True when `key` is a Devin CLI dedup key derived from `metadata.request_id`
+/// rather than from the database row id.
+///
+/// Parser generation 1 keyed every row by row id, so two persisted copies of
+/// one API request both counted; generation 2 collapses them on this key.
+/// Which key a dropped duplicate carried is therefore what decides whether the
+/// drop is a generation difference worth proving to the receiver.
+pub fn is_devin_cli_request_dedup_key(key: Option<&str>) -> bool {
+    key.is_some_and(|key| key.starts_with("devin-cli:") && key.contains(":request:"))
+}
+
+/// Whether a discovered Devin CLI database can actually be read end to end.
+///
+/// [`parse_devin_cli_sqlite`] deliberately swallows open, prepare and step
+/// failures: a database that cannot be opened and one with no usage both
+/// produce no rows. That is right for a local report, but a submission that
+/// rewrites server history on the strength of a "complete" scan needs to know
+/// the difference. A database without the `message_nodes`/`sessions` tables is
+/// readable-and-empty here, since no generation ever counted rows from it.
+pub fn devin_cli_source_is_readable(db_path: &Path) -> bool {
+    let Some(conn) = open_readonly_sqlite_opt(db_path) else {
+        return false;
+    };
+    let mut tables = 0usize;
+    let listed = sqlite_for_each_row_on(
+        &conn,
+        db_path,
+        "SELECT name FROM sqlite_master \
+         WHERE type = 'table' AND name IN ('message_nodes', 'sessions')",
+        None,
+        &mut |_row| {
+            tables += 1;
+            Ok(())
+        },
+    );
+    if !listed.completed() {
+        return false;
+    }
+    if tables < 2 {
+        return true;
+    }
+    let mut counted = false;
+    let scan = sqlite_for_each_row_on(
+        &conn,
+        db_path,
+        "SELECT COUNT(*) FROM message_nodes m JOIN sessions s ON m.session_id = s.id",
+        None,
+        &mut |row| {
+            let _count: i64 = row.get(0)?;
+            counted = true;
+            Ok(())
+        },
+    );
+    scan.completed() && counted
+}
+
 pub fn parse_devin_cli_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(db_path);
     let Some(conn) = open_readonly_sqlite_opt(db_path) else {
@@ -758,6 +814,58 @@ mod tests {
         assert_eq!(messages[0].tokens.output, messages[1].tokens.output);
         assert_eq!(messages[0].dedup_key, messages[1].dedup_key);
         assert_ne!(messages[2].dedup_key, messages[3].dedup_key);
+        // Only the request_id key marks a generation difference.
+        assert!(is_devin_cli_request_dedup_key(
+            messages[0].dedup_key.as_deref()
+        ));
+        assert!(!is_devin_cli_request_dedup_key(
+            messages[2].dedup_key.as_deref()
+        ));
+        assert!(!is_devin_cli_request_dedup_key(None));
+        assert!(!is_devin_cli_request_dedup_key(Some(
+            "devin-desktop:/path:request:1"
+        )));
+    }
+
+    #[test]
+    fn test_devin_cli_source_is_readable_distinguishes_empty_from_broken() {
+        let dir = TempDir::new().unwrap();
+
+        // A well-formed database is readable whether or not it holds rows.
+        let db_path = create_devin_cli_db(&dir);
+        assert!(devin_cli_source_is_readable(&db_path));
+        let conn = Connection::open(&db_path).unwrap();
+        insert_session(&conn, "sess-1", "/Users/alice/project", "gpt-5");
+        insert_message(
+            &conn,
+            "sess-1",
+            r#"{"role":"assistant","metadata":{"generation_model":"gpt-5","metrics":{"input_tokens":1,"output_tokens":1}}}"#,
+            1_700_000_000,
+        );
+        drop(conn);
+        assert!(devin_cli_source_is_readable(&db_path));
+
+        // A database predating `message_nodes` never contributed rows to any
+        // generation, so it is readable-and-empty rather than a failure.
+        let legacy_path = dir.path().join("legacy.db");
+        Connection::open(&legacy_path)
+            .unwrap()
+            .execute_batch("CREATE TABLE sessions (id TEXT PRIMARY KEY)")
+            .unwrap();
+        assert!(devin_cli_source_is_readable(&legacy_path));
+
+        // The parser returns no rows for either of these too, which is exactly
+        // why a separate probe has to tell them apart from the cases above.
+        let garbage_path = dir.path().join("garbage.db");
+        let mut garbage = std::fs::File::create(&garbage_path).unwrap();
+        garbage.write_all(b"not a sqlite database").unwrap();
+        drop(garbage);
+        assert!(!devin_cli_source_is_readable(&garbage_path));
+        assert!(parse_devin_cli_sqlite(&garbage_path).is_empty());
+
+        assert!(!devin_cli_source_is_readable(
+            &dir.path().join("missing.db")
+        ));
     }
 
     #[test]
