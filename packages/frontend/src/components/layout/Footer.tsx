@@ -94,16 +94,16 @@ const LogoLink = styled.a`
 `;
 
 const LogoSvg = styled(Image)`
-  width: 184px;
+  width: 116px;
   height: 21px;
 
   @media (max-width: 560px) {
-    width: 138px;
+    width: 87px;
     height: 15.75px;
   }
 
   @media (max-width: 400px) {
-    width: 110px;
+    width: 69.3px;
     height: 12.55px;
   }
 `;
@@ -252,7 +252,7 @@ export function Footer() {
             <LogoSvg
               src="/assets/footer-logo.svg"
               alt="Tokscale"
-              width={184}
+              width={116}
               height={21}
             />
           </LogoLink>
