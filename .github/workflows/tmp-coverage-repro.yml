@@ -1,7 +1,6 @@
-# TEMPORARY diagnostic workflow for the Coverage Report failures on main.
-# Reproduces the 4 tests that fail only under cargo-tarpaulin's default
-# ptrace engine, with process-state sampling to prove WHY. Removed before
-# this branch merges.
+# TEMPORARY dry run of the main-branch Coverage Report job for this fix
+# branch: same tarpaulin invocation as .github/workflows/test_coverage.yml's
+# coverage job (default ptrace engine, full workspace). Removed before merge.
 name: tmp-coverage-repro
 
 on:
@@ -16,57 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ptrace-repro:
-    name: Ptrace engine repro + diagnostics
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.98.0
-
-      - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@cargo-tarpaulin
-
-      - name: Core abort matrix under default (ptrace) engine, with sampler
-        run: |
-          mkdir -p /tmp/diag
-          (
-            while true; do
-              {
-                echo "=== $(date -u +%T) ==="
-                ps -eLo pid,ppid,stat,wchan:30,etimes,args | grep -E 'tokscale|tarpaulin' | grep -v grep || true
-                for p in $(pgrep -f 'deps/tokscale' || true); do
-                  echo "--- /proc/$p/status"
-                  grep -E '^(Name|State|TracerPid|SigPnd|ShdPnd|SigBlk|SigIgn|SigCgt)' /proc/$p/status 2>/dev/null || true
-                done
-                find /tmp -maxdepth 3 -name 'abort-*.marker' -ls 2>/dev/null || true
-              } >> /tmp/diag/sample.log 2>&1
-              sleep 3
-            done
-          ) &
-          SAMPLER=$!
-          set +e
-          cargo tarpaulin --packages tokscale-core --all-features --timeout 300 --verbose -- --exact message_cache::tests::source_cache_abort_matrix_preserves_canonical_retained_history
-          CORE_EXIT=$?
-          kill $SAMPLER || true
-          echo "CORE_PTRACE_EXIT=$CORE_EXIT"
-          echo "===== sampler output ====="
-          cat /tmp/diag/sample.log
-          echo "CORE_PTRACE_EXIT=$CORE_EXIT"
-          exit 0
-
-      - name: CLI glyph_probe tests under default (ptrace) engine
-        run: |
-          set +e
-          cargo tarpaulin --packages tokscale-cli --all-features --timeout 300 -- tui::glyph_probe::
-          echo "CLI_PTRACE_EXIT=$?"
-          exit 0
-
-  llvm-full:
-    name: Full workspace, --engine llvm (candidate fix validation)
+  coverage-dry-run:
+    name: Coverage Report dry run (default engine, full workspace)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -79,12 +29,11 @@ jobs:
       - name: Install cargo-tarpaulin
         uses: taiki-e/install-action@cargo-tarpaulin
 
-      - name: Generate coverage report (llvm engine)
+      - name: Generate coverage report
         run: |
           cargo tarpaulin \
             --workspace \
             --all-features \
-            --engine llvm \
             --out Xml Json \
             --output-dir ./coverage \
             --timeout 300 \
