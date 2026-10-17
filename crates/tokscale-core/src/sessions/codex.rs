@@ -753,14 +753,12 @@ pub fn max_codex_archive_bytes() -> u64 {
     // This is read per scanned archive and per cache-identity check, so the
     // diagnostic has to be emitted once rather than once per file.
     if codex_archive_limit_override_is_usable(raw.as_deref()) == Some(false) {
-        warn_invalid_codex_archive_limit_once(
-            &raw.as_deref().unwrap_or_default().to_string_lossy(),
-        );
+        warn_invalid_codex_archive_limit_once(raw.as_deref().unwrap_or_default());
     }
     parse_max_codex_archive_bytes(raw.as_deref())
 }
 
-fn warn_invalid_codex_archive_limit_once(raw: &str) {
+fn warn_invalid_codex_archive_limit_once(raw: &std::ffi::OsStr) {
     static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     let mut emitted = false;
     WARNED.get_or_init(|| {
