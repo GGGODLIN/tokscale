@@ -765,7 +765,7 @@ async fn generate_wrapped_image(data: &WrappedData, options: &RenderOptions) -> 
     if let Ok(logo_path) = fetch_svg_and_convert_to_png(
         &client,
         TOKSCALE_LOGO_SVG_URL,
-        "tokscale-logo@2x.png",
+        "tokscale-logo-v2@2x.png",
         TOKSCALE_LOGO_PNG_SIZE * SCALE,
     )
     .await
