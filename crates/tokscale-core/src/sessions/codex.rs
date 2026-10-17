@@ -716,18 +716,57 @@ pub(crate) fn register_archive_limit_override(
     ArchiveLimitOverrideGuard { path }
 }
 
-pub(crate) fn parse_max_codex_archive_bytes(raw: Option<&str>) -> u64 {
+pub(crate) const CODEX_MAX_DECODED_BYTES_ENV: &str = "TOKSCALE_CODEX_MAX_DECODED_BYTES";
+
+/// Whether a raw `TOKSCALE_CODEX_MAX_DECODED_BYTES` value is usable.
+///
+/// An unset variable is not a mistake, so it reports `None`. A value that is
+/// set but cannot be used reports `Some(false)`: the limit then silently
+/// reverts to the 1 GiB default, and the skipped-archive warning quotes that
+/// default, so without this the user is told their archives are too large
+/// while believing they already raised the ceiling.
+pub(crate) fn codex_archive_limit_override_is_usable(raw: Option<&str>) -> Option<bool> {
+    let raw = raw?;
+    Some(parsed_codex_archive_limit(Some(raw)).is_some())
+}
+
+fn parsed_codex_archive_limit(raw: Option<&str>) -> Option<u64> {
     raw.and_then(|v| v.trim().parse::<u64>().ok())
+        // `archive_limit.saturating_add(1)` bounds the decoder, so u64::MAX
+        // would saturate and stop bounding it at all.
         .filter(|&v| v > 0 && v < u64::MAX)
-        .unwrap_or(MAX_CODEX_ARCHIVE_BYTES)
+}
+
+pub(crate) fn parse_max_codex_archive_bytes(raw: Option<&str>) -> u64 {
+    parsed_codex_archive_limit(raw).unwrap_or(MAX_CODEX_ARCHIVE_BYTES)
 }
 
 pub fn max_codex_archive_bytes() -> u64 {
-    parse_max_codex_archive_bytes(
-        std::env::var("TOKSCALE_CODEX_MAX_DECODED_BYTES")
-            .ok()
-            .as_deref(),
-    )
+    let raw = std::env::var(CODEX_MAX_DECODED_BYTES_ENV).ok();
+    // This is read per scanned archive and per cache-identity check, so the
+    // diagnostic has to be emitted once rather than once per file.
+    if codex_archive_limit_override_is_usable(raw.as_deref()) == Some(false) {
+        warn_invalid_codex_archive_limit_once(raw.as_deref().unwrap_or_default());
+    }
+    parse_max_codex_archive_bytes(raw.as_deref())
+}
+
+fn warn_invalid_codex_archive_limit_once(raw: &str) {
+    static WARNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let mut emitted = false;
+    WARNED.get_or_init(|| {
+        emitted = true;
+    });
+    if !emitted {
+        return;
+    }
+    crate::tui_signal::emit_or_defer_stderr(format!(
+        "tokscale: warning: {CODEX_MAX_DECODED_BYTES_ENV}={raw:?} is not a whole number of bytes \
+         between 1 and {max}; using the default {default}-byte decoded-size limit for compressed \
+         Codex rollouts.",
+        max = u64::MAX - 1,
+        default = MAX_CODEX_ARCHIVE_BYTES,
+    ));
 }
 
 fn archive_limit_for_path(_path: &Path) -> u64 {
@@ -5321,6 +5360,41 @@ mod tests {
         assert!(parsed.consumed_offset > SIMULATED_LEGACY_LIMIT);
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].tokens.total(), 160);
+    }
+
+    #[test]
+    fn codex_archive_limit_override_usability_distinguishes_unset_from_invalid() {
+        assert_eq!(codex_archive_limit_override_is_usable(None), None);
+        assert_eq!(
+            codex_archive_limit_override_is_usable(Some("65536")),
+            Some(true)
+        );
+        assert_eq!(
+            codex_archive_limit_override_is_usable(Some(" 2147483648 ")),
+            Some(true)
+        );
+        // Each of these silently reverts to the default, so each has to be
+        // reported rather than treated as an accepted ceiling.
+        assert_eq!(
+            codex_archive_limit_override_is_usable(Some("0")),
+            Some(false)
+        );
+        assert_eq!(
+            codex_archive_limit_override_is_usable(Some("-1")),
+            Some(false)
+        );
+        assert_eq!(
+            codex_archive_limit_override_is_usable(Some("512MiB")),
+            Some(false)
+        );
+        assert_eq!(
+            codex_archive_limit_override_is_usable(Some("")),
+            Some(false)
+        );
+        assert_eq!(
+            codex_archive_limit_override_is_usable(Some(&u64::MAX.to_string())),
+            Some(false)
+        );
     }
 
     #[test]

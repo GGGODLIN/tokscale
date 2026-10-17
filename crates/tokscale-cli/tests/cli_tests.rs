@@ -7507,3 +7507,63 @@ fn test_codex_archive_limit_cache_identity_uses_exact_ceiling() {
     let rejected_json: serde_json::Value = serde_json::from_slice(&rejected.stdout).unwrap();
     assert_eq!(rejected_json["totalMessages"].as_i64().unwrap(), 0);
 }
+
+#[test]
+fn test_codex_invalid_max_decoded_bytes_env_warns_and_uses_default() {
+    let tmp = TempDir::new().unwrap();
+    let sessions = tmp.path().join(".codex/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+
+    let content = concat!(
+        r#"{"timestamp":"2026-10-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-10-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160},"last_token_usage":{"input_tokens":140,"cached_input_tokens":30,"output_tokens":20,"reasoning_output_tokens":10,"total_tokens":160}}}}"#,
+        "\n"
+    );
+    fs::write(
+        sessions.join("fixture.jsonl.zst"),
+        zstd::encode_all(content.as_bytes(), 0).unwrap(),
+    )
+    .unwrap();
+
+    // "512MiB" looks like a limit a user would write, but it does not parse, so
+    // the ceiling silently stays at the 1 GiB default.
+    let output = cmd_with_home(tmp.path())
+        .env("TOKSCALE_CODEX_MAX_DECODED_BYTES", "512MiB")
+        .args(["--client", "codex", "--json", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .contains("TOKSCALE_CODEX_MAX_DECODED_BYTES=\"512MiB\" is not a whole number of bytes"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("using the default 1073741824-byte decoded-size limit"),
+        "stderr: {stderr}"
+    );
+    // The archive is well under the default, so the invalid value must not cost
+    // the user their usage.
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["totalMessages"].as_i64().unwrap(), 1);
+    assert_eq!(json["totalInput"].as_i64().unwrap(), 110);
+
+    // A valid value stays silent.
+    let valid = cmd_with_home(tmp.path())
+        .env("TOKSCALE_CODEX_MAX_DECODED_BYTES", "4096")
+        .args(["--client", "codex", "--json", "--no-spinner"])
+        .output()
+        .unwrap();
+    assert!(valid.status.success());
+    let valid_stderr = String::from_utf8_lossy(&valid.stderr);
+    assert!(
+        !valid_stderr.contains("is not a whole number of bytes"),
+        "stderr: {valid_stderr}"
+    );
+}
