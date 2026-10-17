@@ -5112,8 +5112,29 @@ fn incompletely_read_clients(
         .collect()
 }
 
+/// True when the corrected side of every model on a proof day is empty: the
+/// previous generation counted rows there that this generation drops
+/// entirely, so the submission has no contribution to date for the day.
+fn recount_proof_day_is_all_duplicates(
+    models: &std::collections::BTreeMap<String, tokscale_core::RecountProofEntry>,
+) -> bool {
+    models.values().all(|entry| {
+        let tokens = &entry.corrected.tokens;
+        tokens.input == 0
+            && tokens.output == 0
+            && tokens.cache_read == 0
+            && tokens.cache_write == 0
+            && tokens.cache_write_1h == 0
+            && tokens.reasoning == 0
+            && entry.corrected.messages == 0
+    })
+}
+
 /// Recount proofs for the clients that carry full-history authority in
-/// `scope`, limited to the days the submission actually dates for them.
+/// `scope`, limited to the days the submission actually dates for them plus
+/// the days whose every row the corrected generation drops: those have no
+/// contribution to date, yet their stored over-count is exactly what the
+/// proof exists to heal.
 fn submission_recount_proofs(
     graph: &tokscale_core::GraphResultV2,
     scope: &TsScanScope,
@@ -5131,7 +5152,10 @@ fn submission_recount_proofs(
             .collect();
         let days: std::collections::BTreeMap<_, _> = proof
             .iter()
-            .filter(|(date, _)| submitted_dates.contains(date.as_str()))
+            .filter(|(date, models)| {
+                submitted_dates.contains(date.as_str())
+                    || recount_proof_day_is_all_duplicates(models)
+            })
             .map(|(date, models)| {
                 let models = models
                     .iter()
@@ -10170,7 +10194,9 @@ mod tests {
     /// The proof rides only on full-history authority and only for days the
     /// payload actually dates for that client: a bounded scan freezes on the
     /// receiver anyway, and a proof for a day the submission never covers
-    /// could not be checked against the snapshot it claims to describe.
+    /// could not be checked against the snapshot it claims to describe. The
+    /// one exception is a day whose corrected side is empty, where "nothing
+    /// submitted" IS the snapshot the proof describes.
     #[test]
     fn submit_payload_ships_recount_proofs_only_with_full_history_authority() {
         let mut graph = graph_result_with_contributions(vec![day_with_clients(
@@ -10201,6 +10227,16 @@ mod tests {
                 corrected: recount_cell(10, 0.1, 1),
             },
         );
+        // Kept below: every row of this day was a request_id duplicate of a
+        // row the corrected generation dated elsewhere, so the day has no
+        // contribution and yet its stored over-count still needs the proof.
+        proof.entry("2026-10-02".to_string()).or_default().insert(
+            "swe-2-high".to_string(),
+            tokscale_core::RecountProofEntry {
+                previous: recount_cell(25, 0.25, 2),
+                corrected: recount_cell(0, 0.0, 0),
+            },
+        );
         graph.recount_proofs.insert("devin-cli".to_string(), proof);
         let clients = vec!["devin-cli".to_string()];
 
@@ -10225,6 +10261,14 @@ mod tests {
         );
         assert_eq!(proofs["2026-10-08"]["swe-2-high"]["corrected"]["cost"], 3.5);
         assert!(proofs.get("2026-10-01").is_none());
+        assert_eq!(
+            proofs["2026-10-02"]["swe-2-high"]["previous"]["tokens"]["input"],
+            25
+        );
+        assert_eq!(
+            proofs["2026-10-02"]["swe-2-high"]["corrected"]["messages"],
+            0
+        );
 
         let bounded = to_ts_token_contribution_data(
             &graph,
