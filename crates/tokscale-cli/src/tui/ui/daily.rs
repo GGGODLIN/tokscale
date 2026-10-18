@@ -543,7 +543,7 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
             let idx = i + start;
             let is_selected = idx == selected_index;
             let is_striped = idx % 2 == 1;
-            let model_color = app.model_color_for(row.provider, row.color_key);
+            let model_color = app.model_color_for(&row.provider, row.color_key);
 
             let cells: Vec<Cell> = if is_very_narrow {
                 vec![
@@ -561,8 +561,14 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(get_client_display_name(row.source))
-                        .style(Style::default().fg(theme_muted)),
+                    Cell::from(
+                        row.source
+                            .split(", ")
+                            .map(get_client_display_name)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )
+                    .style(Style::default().fg(theme_muted)),
                     Cell::from(row.messages.to_string()),
                     total_tokens_cell(row.tokens.total(), &app.theme),
                     Cell::from(format_cost(row.cost)).style(Style::default().fg(Color::Green)),
@@ -575,9 +581,15 @@ fn render_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                             .fg(model_color)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Cell::from(get_provider_display_name(row.provider)),
-                    Cell::from(get_client_display_name(row.source))
-                        .style(Style::default().fg(theme_muted)),
+                    Cell::from(get_provider_display_name(&row.provider)),
+                    Cell::from(
+                        row.source
+                            .split(", ")
+                            .map(get_client_display_name)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )
+                    .style(Style::default().fg(theme_muted)),
                     Cell::from(row.messages.to_string()),
                     Cell::from(format_tokens(row.tokens.input)).style(metric_input_style),
                     Cell::from(format_tokens(row.tokens.output)).style(metric_output_style),
@@ -768,6 +780,30 @@ mod tests {
             },
         );
         day
+    }
+
+    #[test]
+    fn daily_detail_render_follows_model_grouping() {
+        let mut app = make_app(200);
+        let date = NaiveDate::from_ymd_opt(2026, 5, 29).unwrap();
+        let mut day = day_with_detail(date, 3.0);
+        let source = day.source_breakdown.remove("claude-code").unwrap();
+        day.source_breakdown
+            .insert("claude".to_string(), source.clone());
+        day.source_breakdown.insert("magpie".to_string(), source);
+        app.data.daily = vec![day];
+        app.selected_daily_detail_date = Some(date);
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::Model;
+
+        let body = render_body(&mut app, 200, 12);
+        assert_eq!(body.matches("claude-sonnet-4").count(), 1, "{body}");
+        assert!(body.contains("$6.00"), "{body}");
+        assert!(body.contains("Claude Code, M"), "{body}");
+
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::ClientModel;
+        let body = render_body(&mut app, 200, 12);
+        assert_eq!(body.matches("claude-sonnet-4").count(), 2, "{body}");
+        assert_eq!(body.matches("$3.00").count(), 2, "{body}");
     }
 
     #[test]

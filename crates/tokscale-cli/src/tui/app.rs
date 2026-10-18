@@ -1,5 +1,6 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -200,16 +201,95 @@ pub struct ClickArea {
     pub action: ClickAction,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DailyDetailRow<'a> {
-    pub source: &'a str,
-    pub provider: &'a str,
+    pub source: Cow<'a, str>,
+    pub provider: Cow<'a, str>,
     pub model: &'a str,
     pub color_key: &'a str,
-    pub tokens: &'a TokenBreakdown,
+    pub tokens: TokenBreakdown,
     pub cost: f64,
     pub messages: u64,
     pub ms_per_1k_tokens: Option<f64>,
+}
+
+fn daily_detail_rows(day: &DailyUsage, merge_sources: bool) -> Vec<DailyDetailRow<'_>> {
+    let mut groups: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for (source, info) in &day.source_breakdown {
+        for (model_key, model) in &info.models {
+            let source_key = if merge_sources {
+                None
+            } else {
+                Some(source.as_str())
+            };
+            groups
+                .entry((source_key, model_key))
+                .or_default()
+                .push((source.as_str(), model));
+        }
+    }
+
+    groups
+        .into_values()
+        .map(|models| {
+            let (source, first) = models[0];
+            let mut row = DailyDetailRow {
+                source: Cow::Borrowed(source),
+                provider: Cow::Borrowed(&first.provider),
+                model: &first.display_name,
+                color_key: &first.color_key,
+                tokens: first.tokens.clone(),
+                cost: first.cost,
+                messages: first.messages,
+                ms_per_1k_tokens: first.performance.ms_per_1k_tokens,
+            };
+            if models.len() == 1 {
+                return row;
+            }
+
+            row.source = Cow::Owned(
+                models
+                    .iter()
+                    .map(|(source, _)| *source)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            row.provider = Cow::Owned(
+                models
+                    .iter()
+                    .flat_map(|(_, model)| model.provider.split(", "))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            let mut duration = first.performance.total_duration_ms;
+            let mut timed_tokens = first.performance.timed_tokens;
+            let mut samples = first.performance.sample_count;
+            for (_, model) in &models[1..] {
+                row.tokens.input = row.tokens.input.saturating_add(model.tokens.input);
+                row.tokens.output = row.tokens.output.saturating_add(model.tokens.output);
+                row.tokens.cache_read = row
+                    .tokens
+                    .cache_read
+                    .saturating_add(model.tokens.cache_read);
+                row.tokens.cache_write = row
+                    .tokens
+                    .cache_write
+                    .saturating_add(model.tokens.cache_write);
+                row.tokens.reasoning = row.tokens.reasoning.saturating_add(model.tokens.reasoning);
+                row.cost += model.cost;
+                row.messages = row.messages.saturating_add(model.messages);
+                duration = duration.saturating_add(model.performance.total_duration_ms);
+                timed_tokens = timed_tokens.saturating_add(model.performance.timed_tokens);
+                samples = samples.saturating_add(model.performance.sample_count);
+            }
+            row.ms_per_1k_tokens =
+                tokscale_core::ModelPerformance::from_totals(duration, timed_tokens, samples)
+                    .ms_per_1k_tokens;
+            row
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -2679,31 +2759,16 @@ impl App {
             return Vec::new();
         };
 
-        let mut rows: Vec<DailyDetailRow<'_>> = day
-            .source_breakdown
-            .iter()
-            .flat_map(|(source, source_info)| {
-                source_info
-                    .models
-                    .values()
-                    .map(move |model_info| DailyDetailRow {
-                        source,
-                        provider: &model_info.provider,
-                        model: &model_info.display_name,
-                        color_key: &model_info.color_key,
-                        tokens: &model_info.tokens,
-                        cost: model_info.cost,
-                        messages: model_info.messages,
-                        ms_per_1k_tokens: model_info.performance.ms_per_1k_tokens,
-                    })
-            })
-            .collect();
+        let mut rows = daily_detail_rows(
+            day,
+            *self.group_by.borrow() == tokscale_core::GroupBy::Model,
+        );
 
         let tie_breaker = |a: &DailyDetailRow<'_>, b: &DailyDetailRow<'_>| {
             a.source
-                .cmp(b.source)
+                .cmp(&b.source)
                 .then_with(|| a.model.cmp(b.model))
-                .then_with(|| a.provider.cmp(b.provider))
+                .then_with(|| a.provider.cmp(&b.provider))
         };
 
         match (self.sort_field, self.sort_direction) {
@@ -4229,6 +4294,115 @@ mod tests {
         app.handle_key_event(key(KeyCode::Enter));
 
         assert_eq!(app.get_current_list_len(), 2);
+    }
+
+    #[test]
+    fn test_daily_detail_model_merges_sources_and_preserves_totals() {
+        let mut app = make_app();
+        let mut day = daily_usage("2026-05-17", 1.25, vec![("model-a", "openai", 1.25)]);
+        let first = day.source_breakdown.get_mut("claude").unwrap();
+        let model = first.models.get_mut("model-a").unwrap();
+        model.tokens = TokenBreakdown {
+            input: 10,
+            output: 20,
+            cache_read: 30,
+            cache_write: 40,
+            reasoning: 50,
+        };
+        model.messages = 2;
+        model.performance = tokscale_core::ModelPerformance::from_totals(100, 1_000, 1);
+        let mut second = first.clone();
+        let model = second.models.get_mut("model-a").unwrap();
+        model.provider = "openrouter".to_string();
+        model.tokens = TokenBreakdown {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            reasoning: 5,
+        };
+        model.cost = 2.5;
+        model.messages = 3;
+        model.performance = tokscale_core::ModelPerformance::from_totals(900, 3_000, 1);
+        day.source_breakdown.insert("magpie".to_string(), second);
+        app.selected_daily_detail_date = Some(day.date);
+        app.data.daily = vec![day];
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::Model;
+
+        let rows = app.get_sorted_daily_detail_rows();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.source, "claude, magpie");
+        assert_eq!(row.provider, "openai, openrouter");
+        assert_eq!(row.model, "model-a");
+        assert_eq!(row.tokens.input, 11);
+        assert_eq!(row.tokens.output, 22);
+        assert_eq!(row.tokens.cache_read, 33);
+        assert_eq!(row.tokens.cache_write, 44);
+        assert_eq!(row.tokens.reasoning, 55);
+        assert_eq!(row.tokens.total(), 165);
+        assert_eq!(row.cost, 3.75);
+        assert_eq!(row.messages, 5);
+        assert_eq!(row.ms_per_1k_tokens, Some(250.0));
+
+        for grouping in [
+            tokscale_core::GroupBy::ClientModel,
+            tokscale_core::GroupBy::ClientProviderModel,
+            tokscale_core::GroupBy::WorkspaceModel,
+            tokscale_core::GroupBy::Session,
+            tokscale_core::GroupBy::ClientSession,
+        ] {
+            *app.group_by.borrow_mut() = grouping.clone();
+            let rows = app.get_sorted_daily_detail_rows();
+            assert_eq!(rows.len(), 2, "{grouping}");
+            assert_eq!(rows.iter().map(|row| row.tokens.total()).sum::<u64>(), 165);
+            assert_eq!(rows.iter().map(|row| row.cost).sum::<f64>(), 3.75);
+            assert_eq!(rows.iter().map(|row| row.messages).sum::<u64>(), 5);
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.source == "claude")
+                    .unwrap()
+                    .ms_per_1k_tokens,
+                Some(100.0)
+            );
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.source == "magpie")
+                    .unwrap()
+                    .ms_per_1k_tokens,
+                Some(300.0)
+            );
+        }
+    }
+
+    #[test]
+    fn test_daily_detail_uses_model_map_key_and_does_not_average_unknown_speed() {
+        let mut day = daily_usage(
+            "2026-05-17",
+            3.0,
+            vec![("model-a", "openai", 1.0), ("model-b", "openai", 2.0)],
+        );
+        let mut other = day.source_breakdown["claude"].clone();
+        other.models.remove("model-b");
+        let model = other.models.get_mut("model-a").unwrap();
+        model.performance.ms_per_1k_tokens = Some(100.0);
+        day.source_breakdown.insert("magpie".to_string(), other);
+        day.source_breakdown
+            .get_mut("claude")
+            .unwrap()
+            .models
+            .get_mut("model-b")
+            .unwrap()
+            .display_name = "model-a".to_string();
+
+        let rows = daily_detail_rows(&day, true);
+        assert_eq!(rows.len(), 2);
+        let merged = rows.iter().find(|row| row.source.contains(", ")).unwrap();
+        assert_eq!(merged.cost, 2.0);
+        assert_eq!(merged.ms_per_1k_tokens, None);
+        assert_eq!(rows.iter().map(|row| row.cost).sum::<f64>(), 4.0);
+        assert_eq!(day.source_breakdown["claude"].models.len(), 2);
+        assert_eq!(day.source_breakdown["magpie"].models.len(), 1);
     }
 
     #[test]
