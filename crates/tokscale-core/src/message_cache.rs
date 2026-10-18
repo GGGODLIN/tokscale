@@ -1700,6 +1700,7 @@ fn parser_version(client: ClientId) -> u32 {
         return version;
     }
     match client {
+        ClientId::Magpie => 1,
         ClientId::Aside => 1,
         // v1->v2 (#1285): compressed OpenClaw archives were scanned as plain
         // JSONL and cached as empty. Their bytes do not change when decoding is

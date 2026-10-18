@@ -1,0 +1,1 @@
+{"t": "2026-10-18T10:50:24.186585+08:00", "agent": "claude", "model": "gemini-4-argon", "req": "google/gemini-4-argon", "served": "gemini-4-argon", "in": 67878, "out": 298, "cache_read": 65187, "cache_write": 0, "ms": 56465, "status": 200, "response_id": "msg_fixture_cc", "ep": "/v1/messages \u2192 /v1/chat/completions"}

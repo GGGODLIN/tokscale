@@ -8,6 +8,14 @@
 
 > A high-performance CLI tool and visualization dashboard for tracking token usage and costs across multiple AI coding agents.
 
+### 此 fork 的 Magpie 本機帳務
+
+保留原版來源與 TUI，另以唯讀方式讀取 `~/.magpie-machine/home/.config/magpie/usage.jsonl`。可用 `MAGPIE_USAGE_DIR` 指定帳務目錄，或沿用 scanner 的 `magpie` extra paths；`--home` 使用該 home 下的預設路徑，不採用環境覆寫。來源選單與 `--client magpie` 可只看 gateway 帳。
+
+同一 response/message ID 的本機與 gateway 觀測只計一次；匹配後保留本機 session、workspace、標題與時間，採用 gateway token 與實際 served model 重新估價。只支援已確認的 `msg_resp_`／`resp_` alias，不把 request ID 或時間、token 相似度當成同一請求。目前可接通 Claude Code message ID、Codex `token_usage_record.response_id` 及 Pi 家族 `responseId`；其他來源與缺 ID 的重疊尚未驗證。無法排除重疊時保守排除 gateway 列，於 stderr 與 TUI 狀態列列出排除筆數、token 數；數字可能低估，不代表全機精準帳。
+
+`in` 與 cache 分開，reasoning 是 `out` 子集；金額是 Tokscale 估價而非實付，無價格時保留未估價。gateway-only session 優先使用 `native_session`，其次 `session`，缺少時顯示 unknown。Magpie 存在時暖掃會補讀 Codex 取得回應身分，來源 cache 與 compacted 歷史保留。此功能不呼叫 Magpie API、不修改來源、設定或模型路由，也不替原版 Usage 頁新增訂閱額度查詢。
+
 > [!TIP]
 >
 > I drop new open-source work every week. Don't miss the next one.

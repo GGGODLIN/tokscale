@@ -646,6 +646,8 @@ fn render_status_row(frame: &mut Frame, app: &App, area: Rect) {
             tr(lang, MessageKey::StatusSavingSourceCache),
             Style::default().fg(app.theme.muted),
         ));
+    } else if let Some(warning) = tokscale_core::tui_signal::magpie_scan_warning() {
+        spans.push(Span::styled(warning, Style::default().fg(Color::Yellow)));
     } else if let Some(ref msg) = app.status_message {
         spans.push(Span::styled(
             msg.clone(),

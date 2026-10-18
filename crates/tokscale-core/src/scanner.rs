@@ -737,6 +737,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 // picks up every session's snapshot.
                 "usage-v2.json" => file_name == "usage-v2.json",
                 "updates.jsonl" => file_name == "updates.jsonl",
+                "usage.jsonl" => file_name == "usage.jsonl",
                 "unified.jsonl" => file_name == "unified.jsonl",
                 "events.jsonl" => file_name == "events.jsonl",
                 // Muse Code: one `session.jsonl` per session directory at any
@@ -2088,6 +2089,8 @@ fn scan_all_clients_with_env_strategy_inner(
     // session/model/workspace metadata. Treat configured CLI roots as lookup
     // inputs for a Desktop-only scan without enabling CLI usage output.
     let mut enabled_with_lookups = enabled.clone();
+    // gateway 帳即使未被選取，也要用來校正原始來源的重複觀測。
+    enabled_with_lookups.insert(ClientId::Magpie);
     if enabled.contains(&ClientId::DevinDesktop) {
         enabled_with_lookups.insert(ClientId::DevinCli);
     }
@@ -2122,7 +2125,7 @@ fn scan_all_clients_with_env_strategy_inner(
     // per-agent SQLite transcript databases once the roots are settled.
     let mut openclaw_agent_roots: Vec<PathBuf> = Vec::new();
 
-    for client_id in &enabled {
+    for client_id in &enabled_with_lookups {
         if matches!(
             client_id,
             ClientId::OpenCode

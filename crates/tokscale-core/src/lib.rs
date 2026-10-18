@@ -1124,6 +1124,7 @@ impl RecordedCodexTurns {
 }
 
 struct FlushContext<'a> {
+    magpie: Option<&'a std::cell::RefCell<sessions::magpie::Reconciliation>>,
     pricing: Option<&'a pricing::PricingService>,
     include_all: bool,
     requested: HashSet<&'a str>,
@@ -1165,8 +1166,19 @@ fn flush_retained_message<S: MessageSink>(
     mut message: UnifiedMessage,
     context: &FlushContext<'_>,
     sink: &mut S,
-    estimate_source: Option<EstimateSource>,
+    mut estimate_source: Option<EstimateSource>,
 ) {
+    if let Some(magpie) = context.magpie {
+        let mut reconciliation = magpie.borrow_mut();
+        if !reconciliation.reconcile(&mut message, context.pricing) {
+            return;
+        }
+        if reconciliation.has_match(&message) {
+            estimate_source = context
+                .pricing
+                .and_then(|pricing| pricing.take_cost_estimate_source(&message));
+        }
+    }
     if context.include_synthetic {
         let raw_model = message.model_id.clone();
         sessions::synthetic::normalize_synthetic_gateway_fields(
@@ -2789,6 +2801,18 @@ fn parse_all_messages_streaming<S: MessageSink>(
         scanner_settings,
     );
     let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
+    let mut magpie =
+        sessions::magpie::Reconciliation::read(scan_result.get(ClientId::Magpie), clients);
+    if !magpie.is_empty() {
+        // 快取不保存此 sidecar；補讀可保留 compacted 歷史與原本去重鍵的 wire 契約。
+        for path in scan_result.get(ClientId::Codex) {
+            let parsed = sessions::codex::parse_codex_file_incremental(path, 0, Default::default());
+            if parsed.parse_succeeded {
+                magpie.codex_response_ids.extend(parsed.response_ids);
+            }
+        }
+    }
+    let magpie = std::cell::RefCell::new(magpie);
     // `load` reads no shard: each namespace is deserialized the first time a
     // lane asks for one of its sources, and entries whose file is gone are
     // pruned as that namespace loads. A scan therefore pays for the clients it
@@ -2805,6 +2829,7 @@ fn parse_all_messages_streaming<S: MessageSink>(
     let flush_context = {
         let timezone = bucket_tz::BucketTimezone::from_scanner_settings(scanner_settings);
         FlushContext {
+            magpie: Some(&magpie),
             pricing,
             include_all,
             requested: clients.iter().map(String::as_str).collect(),
@@ -4495,6 +4520,11 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // messages are released. The deferred policy deliberately hands these
     // complete messages to its caller before the owned cache write can begin.
     flush_lane(&mut all_messages, &flush_context, sink);
+    let remaining = magpie.borrow_mut().remaining(pricing);
+    for message in remaining {
+        flush_message(message, &flush_context, sink);
+    }
+    tui_signal::update_magpie_scan_warnings(magpie.borrow().warnings());
     StreamingParseOutcome {
         coverage: desktop_coverage,
         pending_save,
@@ -6545,6 +6575,28 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         options.use_env_roots,
         &options.scanner_settings,
     );
+    if !scan_result.get(ClientId::Magpie).is_empty() {
+        let unified = parse_all_messages_with_pricing_with_cache_policy(
+            &home_dir,
+            &clients,
+            None,
+            options.use_env_roots,
+            &options.scanner_settings,
+            SourceCachePolicy::Persistent,
+        );
+        let mut counts = ClientCounts::new();
+        for message in &unified {
+            if let Some(client) = ClientId::from_str(&message.client) {
+                counts.add(client, message.message_count);
+            }
+        }
+        let messages = unified.iter().map(unified_to_parsed).collect();
+        return Ok(ParsedMessages {
+            messages: filter_parsed_messages(messages, &options),
+            counts,
+            processing_time_ms: start.elapsed().as_millis() as u32,
+        });
+    }
     let headless_roots =
         scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
 
@@ -11701,6 +11753,7 @@ mod tests {
     #[test]
     fn test_codex_prefilter_survives_physical_attribution_for_synthetic_request() {
         let context = FlushContext {
+            magpie: None,
             pricing: None,
             include_all: false,
             requested: HashSet::from(["synthetic"]),
@@ -12777,6 +12830,118 @@ mod tests {
         let warm = scan();
         assert_eq!(resumes(), 2, "a rewritten transcript does not resume");
         assert_eq!(warm, cold_scan(&mut env));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn magpie_live_metadata_filters_and_warm_cache_preserve_native_totals() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _env = redirect_cache_home(cache_home.path());
+        let home = source_home.path();
+        for (relative, data) in [
+            (
+                ".claude/projects/demo/session.jsonl",
+                include_str!("../tests/fixtures/magpie/claude.jsonl"),
+            ),
+            (
+                ".codex/sessions/demo.jsonl",
+                include_str!("../tests/fixtures/magpie/codex.jsonl"),
+            ),
+            (
+                ".magpie-machine/home/.config/magpie/usage.jsonl",
+                include_str!("../tests/fixtures/magpie/usage.jsonl"),
+            ),
+        ] {
+            let path = home.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, data).unwrap();
+        }
+        let scan = |clients: &[&str], policy| {
+            parse_all_messages_with_pricing_with_cache_policy(
+                home.to_str().unwrap(),
+                &clients.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                policy,
+            )
+        };
+        for policy in [
+            SourceCachePolicy::InMemory,
+            SourceCachePolicy::Persistent,
+            SourceCachePolicy::Persistent,
+        ] {
+            let all = scan(&[], policy);
+            assert_eq!(all.len(), 2);
+            assert_eq!(all.iter().map(|m| m.tokens.total()).sum::<i64>(), 181672);
+            assert_eq!(
+                all.iter()
+                    .find(|m| m.client == "claude")
+                    .unwrap()
+                    .tokens
+                    .total(),
+                133363
+            );
+            assert_eq!(
+                all.iter()
+                    .find(|m| m.client == "codex")
+                    .unwrap()
+                    .tokens
+                    .total(),
+                48309
+            );
+            let cc = scan(&["claude"], policy);
+            assert_eq!(cc.len(), 1);
+            assert_eq!(cc[0].tokens.total(), 133363);
+            let gateway = scan(&["magpie"], policy);
+            assert_eq!(gateway.len(), 1);
+            assert_eq!(gateway[0].client, "magpie");
+            assert_eq!(gateway[0].tokens.total(), 133363);
+            assert_eq!(scan(&["codex"], policy)[0].tokens.total(), 48309);
+        }
+        let report = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            report
+                .messages
+                .iter()
+                .map(|m| m.input + m.output + m.cache_read + m.cache_write + m.reasoning)
+                .sum::<i64>(),
+            181672
+        );
+        assert_eq!(report.counts.get(ClientId::Claude), 1);
+        assert_eq!(report.counts.get(ClientId::Codex), 1);
+        let codex_path = home.join(".codex/sessions/demo.jsonl");
+        let parsed =
+            sessions::codex::parse_codex_file_incremental(&codex_path, 0, Default::default());
+        assert_eq!(parsed.response_ids.len(), 1);
+        assert_eq!(
+            parsed.response_ids.values().next().unwrap(),
+            "resp_fixture_codex"
+        );
+        let mut row: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/magpie/usage.jsonl").trim())
+                .unwrap();
+        row["response_id"] = "msg_resp_fixture_codex".into();
+        row["agent"] = "codex".into();
+        row["in"] = 100.into();
+        row["out"] = 20.into();
+        row["cache_read"] = 10.into();
+        std::fs::write(
+            home.join(".magpie-machine/home/.config/magpie/usage.jsonl"),
+            row.to_string(),
+        )
+        .unwrap();
+        for policy in [SourceCachePolicy::InMemory, SourceCachePolicy::Persistent] {
+            let codex = scan(&["codex", "magpie"], policy);
+            assert_eq!(codex.len(), 1);
+            assert_eq!(codex[0].client, "codex");
+            assert_eq!(codex[0].tokens.total(), 130);
+        }
     }
 
     #[test]
@@ -18727,6 +18892,7 @@ mod tests {
         apply_pricing_if_available(&mut message, Some(&scan));
         let mut collector = GraphMessageCollector::default();
         let context = FlushContext {
+            magpie: None,
             pricing: Some(&scan),
             include_all: true,
             requested: HashSet::new(),

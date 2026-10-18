@@ -22,7 +22,6 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::Mutex;
@@ -645,6 +644,7 @@ impl CodexArchiveFailure {
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedCodexFile {
     pub messages: Vec<UnifiedMessage>,
+    pub response_ids: HashMap<String, String>,
     pub fallback_timestamp_indices: Vec<usize>,
     pub consumed_offset: u64,
     pub parse_succeeded: bool,
@@ -1055,6 +1055,7 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
     max_record_bytes: usize,
 ) -> ParsedCodexFile {
     let mut messages = Vec::with_capacity(64);
+    let mut response_ids = HashMap::new();
     let mut fallback_timestamp_indices = Vec::new();
     let mut buffer = Vec::with_capacity(4096);
     let mut line = String::with_capacity(4096);
@@ -1650,6 +1651,9 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                         .pending_usage_record
                         .as_ref()
                         .is_some_and(|record| record.reported_by(emitted_usage));
+                    let confirmed_response_id = reports_pending
+                        .then(|| state.pending_usage_record.as_ref()?.response_id.clone())
+                        .flatten();
                     if reports_pending {
                         // The same response: counted once, from here.
                         state.pending_usage_record = None;
@@ -1758,6 +1762,9 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
                         }
                         Some(identity)
                     };
+                    if let (Some(key), Some(id)) = (&message.dedup_key, confirmed_response_id) {
+                        response_ids.insert(key.clone(), id);
+                    }
                     message.set_workspace(
                         state.session_workspace_key.clone(),
                         state.session_workspace_label.clone(),
@@ -1851,6 +1858,7 @@ fn parse_codex_reader_with_record_limit<R: BufRead>(
 
     ParsedCodexFile {
         messages,
+        response_ids,
         fallback_timestamp_indices,
         consumed_offset,
         parse_succeeded,
@@ -2313,6 +2321,7 @@ fn failed_codex_parse(
 ) -> ParsedCodexFile {
     ParsedCodexFile {
         messages: Vec::new(),
+        response_ids: HashMap::new(),
         fallback_timestamp_indices: Vec::new(),
         consumed_offset,
         parse_succeeded: false,

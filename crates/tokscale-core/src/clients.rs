@@ -1124,6 +1124,20 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Magpie = 58 => {
+        id: "magpie",
+        display: "Magpie gateway",
+        logo: None,
+        root: PathRoot::EnvVar {
+            var: "MAGPIE_USAGE_DIR",
+            fallback_relative: ".magpie-machine/home/.config/magpie",
+        },
+        relative: "",
+        pattern: "usage.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: false
     }
 );
 

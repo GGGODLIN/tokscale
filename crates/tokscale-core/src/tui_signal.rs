@@ -15,12 +15,14 @@ static DEFERRED_STDERR: OnceLock<Mutex<DeferredStderr>> = OnceLock::new();
 struct DeferredStderr {
     messages: Vec<String>,
     codex_scan_warnings: Vec<String>,
+    magpie_scan_warnings: Vec<String>,
 }
 
 impl DeferredStderr {
     fn take(&mut self) -> Vec<String> {
         let mut messages = std::mem::take(&mut self.messages);
         messages.append(&mut self.codex_scan_warnings);
+        messages.append(&mut self.magpie_scan_warnings);
         messages
     }
 }
@@ -95,6 +97,28 @@ pub(crate) fn update_codex_scan_warnings(messages: Vec<String>) {
     }
 }
 
+pub fn magpie_scan_warning() -> Option<String> {
+    let deferred = deferred_stderr()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    (!deferred.magpie_scan_warnings.is_empty()).then(|| deferred.magpie_scan_warnings.join(" "))
+}
+
+pub(crate) fn update_magpie_scan_warnings(messages: Vec<String>) {
+    let mut deferred = deferred_stderr()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if is_tui_active() {
+        deferred.magpie_scan_warnings = messages;
+    } else {
+        deferred.magpie_scan_warnings.clear();
+        drop(deferred);
+        for message in messages {
+            eprintln!("{message}");
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn take_deferred_stderr_for_test() -> Vec<String> {
     let mut deferred = deferred_stderr()
@@ -158,6 +182,20 @@ impl Drop for TuiActiveGuard {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn magpie_warning_is_visible_during_tui_and_clears_after_refresh() {
+        let mut restore = TuiActiveGuard::capture();
+        restore.set(true);
+        update_magpie_scan_warnings(vec!["Magpie: excluded 2 rows / 42 tokens".into()]);
+        assert_eq!(
+            magpie_scan_warning().as_deref(),
+            Some("Magpie: excluded 2 rows / 42 tokens")
+        );
+        update_magpie_scan_warnings(Vec::new());
+        assert!(magpie_scan_warning().is_none());
+    }
 
     #[test]
     #[serial]
