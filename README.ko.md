@@ -1226,9 +1226,9 @@ shields.io 스타일의 더 간결한 뱃지를 사용할 수도 있습니다:
 
 Spotify Wrapped에서 영감을 받아, AI 코딩 어시스턴트 사용량을 요약한 아름다운 연간 리뷰 이미지를 생성합니다.
 
-| `bunx tokscale@latest wrapped` | `bunx tokscale@latest wrapped --clients` | `bunx tokscale@latest wrapped --agents --disable-pinned` |
-|:---:|:---:|:---:|
-| ![Wrapped 2025 (Agents + Pin Sisyphus)](.github/assets/wrapped-2025-agents.png) | ![Wrapped 2025 (Clients)](.github/assets/wrapped-2025-clients.png) | ![Wrapped 2025 (Agents + Disable Pinned)](.github/assets/wrapped-2025-agents-disable-pinned.png) |
+| `bunx tokscale@latest wrapped` | `bunx tokscale@latest wrapped --clients` |
+|:---:|:---:|
+| ![Wrapped 2025 (Agents)](.github/assets/wrapped-2025-agents.png) | ![Wrapped 2025 (Clients)](.github/assets/wrapped-2025-clients.png) |
 
 ### 명령어
 
