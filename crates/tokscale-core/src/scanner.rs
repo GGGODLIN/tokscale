@@ -3090,17 +3090,26 @@ fn scan_all_clients_with_env_strategy_inner(
     let mut seen: HashSet<(ClientId, PathBuf)> = HashSet::new();
     let mut cherry_files: Vec<(bool, String, PathBuf)> = Vec::new();
     for (client_id, root, files) in scan_results {
-        for file in files {
-            if client_id == ClientId::CherryStudio {
-                let is_v2 = is_cherrystudio_v2_root(Path::new(&root));
+        if client_id == ClientId::CherryStudio {
+            let is_v2 = is_cherrystudio_v2_root(Path::new(&root));
+            for file in files {
                 let rel = file
                     .strip_prefix(&root)
                     .unwrap_or(&file)
                     .to_string_lossy()
                     .to_string();
                 cherry_files.push((is_v2, rel, file));
-            } else {
-                let key = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+            }
+        } else {
+            // 5.5 萬個歷史檔若在單一執行緒逐一跑 realpath 會卡住 TUI 刷新；平行解析並快取穩定路徑。
+            let keyed_files: Vec<(PathBuf, PathBuf)> = files
+                .into_par_iter()
+                .map(|file| {
+                    let key = canonicalize_scan_path(&file);
+                    (key, file)
+                })
+                .collect();
+            for (key, file) in keyed_files {
                 if seen.insert((client_id, key)) {
                     result.get_mut(client_id).push(file);
                 }
@@ -3118,7 +3127,7 @@ fn scan_all_clients_with_env_strategy_inner(
     result.micode_dbs = dedup_dbs_by_canonical_path(micode_dbs);
 
     for file in dedupe_cherrystudio_transcripts(cherry_files) {
-        let key = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+        let key = canonicalize_scan_path(&file);
         if seen.insert((ClientId::CherryStudio, key)) {
             result.get_mut(ClientId::CherryStudio).push(file);
         }
@@ -3139,11 +3148,11 @@ fn scan_all_clients_with_env_strategy_inner(
                 crate::sessions::openclaw::classify_openclaw_jsonl(path)
                     == crate::sessions::openclaw::OpenClawJsonlKind::CodexRollout
             })
-            .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .map(|path| canonicalize_scan_path(path))
             .collect();
         if !openclaw_rollouts.is_empty() {
             result.get_mut(ClientId::Codex).retain(|path| {
-                let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                let key = canonicalize_scan_path(path);
                 !openclaw_rollouts.contains(&key)
             });
         }
@@ -3186,6 +3195,29 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     result
+}
+
+#[cfg(not(test))]
+fn canonicalize_scan_path(path: &Path) -> PathBuf {
+    static CACHE: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::HashMap<PathBuf, PathBuf>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+    if let Ok(guard) = cache.read() {
+        if let Some(cached) = guard.get(path) {
+            return cached.clone();
+        }
+    }
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Ok(mut guard) = cache.write() {
+        guard.insert(path.to_path_buf(), resolved.clone());
+    }
+    resolved
+}
+
+#[cfg(test)]
+fn canonicalize_scan_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Drop each legacy Amp thread file whose `T-*.json` name also exists under

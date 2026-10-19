@@ -915,12 +915,49 @@ fn cached_claude_parent_paths(cached: &SourceFingerprint) -> Vec<(String, PathBu
         .collect()
 }
 
+#[cfg(not(test))]
+fn verified_fingerprints() -> &'static std::sync::RwLock<HashMap<CachedPath, (u64, u64)>> {
+    static CACHE: OnceLock<std::sync::RwLock<HashMap<CachedPath, (u64, u64)>>> = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+#[cfg(not(test))]
+fn is_verified_fingerprint(path: &CachedPath, size: u64, modified_ns: u64) -> bool {
+    modified_ns > 0
+        && verified_fingerprints()
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(path).copied())
+            == Some((size, modified_ns))
+}
+
+#[cfg(not(test))]
+fn record_verified_fingerprint(path: CachedPath, size: u64, modified_ns: u64) {
+    if modified_ns == 0 {
+        return;
+    }
+    if let Ok(mut guard) = verified_fingerprints().write() {
+        guard.insert(path, (size, modified_ns));
+    }
+}
+
 fn primary_fingerprint_matches(path: &Path, cached: &SourceFingerprint) -> Option<bool> {
     let (size, modified_ns) = metadata_signature(path).ok()?;
     if size != cached.size || modified_ns != cached.modified_ns {
         return Some(false);
     }
-    Some(compute_sample_hashes(path, size)? == cached.sample_hashes)
+    #[cfg(not(test))]
+    let cached_path = CachedPath::from_path(path);
+    #[cfg(not(test))]
+    if is_verified_fingerprint(&cached_path, size, modified_ns) {
+        return Some(true);
+    }
+    let matches = compute_sample_hashes(path, size)? == cached.sample_hashes;
+    #[cfg(not(test))]
+    if matches {
+        record_verified_fingerprint(cached_path, size, modified_ns);
+    }
+    Some(matches)
 }
 
 fn metadata_signature(path: &Path) -> std::io::Result<(u64, u64)> {
@@ -957,9 +994,15 @@ fn related_fingerprint_metadata_matches(
                 if !related.exists || related.size != size || related.modified_ns != modified_ns {
                     return Some(false);
                 }
+                #[cfg(not(test))]
+                if is_verified_fingerprint(&related.path, size, modified_ns) {
+                    continue;
+                }
                 if compute_sample_hashes(related_path, size)? != related.sample_hashes {
                     return Some(false);
                 }
+                #[cfg(not(test))]
+                record_verified_fingerprint(related.path.clone(), size, modified_ns);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if related.exists {
@@ -3340,6 +3383,21 @@ where
         .collect()
 }
 
+#[cfg(not(test))]
+#[derive(Clone)]
+struct CachedShardMemo {
+    len: u64,
+    modified_ns: u64,
+    parser_version: u32,
+    entries: Vec<(CacheKey, CachedSourceEntry)>,
+}
+
+#[cfg(not(test))]
+fn shard_mem_cache() -> &'static Mutex<HashMap<PathBuf, CachedShardMemo>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedShardMemo>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl SourceMessageCache {
     /// Opens the persistent cache without reading any shard.
     ///
@@ -3423,50 +3481,176 @@ impl SourceMessageCache {
             }
         };
 
-        for dir_entry in read_dir.filter_map(Result::ok) {
-            let Some(index) = parse_shard_filename(&dir_entry.file_name()) else {
-                continue;
-            };
-            let shard_key = CacheShardKey {
-                namespace: namespace.to_string(),
-                index,
-            };
-            let path = dir_entry.path();
-            let (entries, migrated) = match read_shard(&path, identity) {
-                ShardReadStatus::Loaded(entries) => (entries, false),
-                ShardReadStatus::Migrated(entries) => (entries, true),
-                ShardReadStatus::Missing => continue,
-                ShardReadStatus::Stale => {
-                    state.rewrite_shards.insert(shard_key);
-                    state.dirty = true;
-                    continue;
+        let mut shard_paths: Vec<(usize, PathBuf)> = read_dir
+            .filter_map(Result::ok)
+            .filter_map(|dir_entry| {
+                let index = parse_shard_filename(&dir_entry.file_name())?;
+                Some((index, dir_entry.path()))
+            })
+            .collect();
+        shard_paths.sort_unstable_by_key(|(index, _)| *index);
+
+        #[cfg(not(test))]
+        let safe_mtime_cutoff_ns = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+            .saturating_sub(2_000_000_000);
+
+        // 256 個分片若在單一執行緒持鎖反序列化，會讓其餘 Rayon 執行緒空等並每 60 秒重讀 377 MB。
+        let shard_outcomes: Vec<_> = shard_paths
+            .into_par_iter()
+            .map(|(index, path)| {
+                let shard_key = CacheShardKey {
+                    namespace: namespace.to_string(),
+                    index,
+                };
+                #[cfg(not(test))]
+                let shard_sig = metadata_signature(&path).ok();
+                #[cfg(not(test))]
+                if let Some((len, modified_ns)) = shard_sig {
+                    if let Some(entries) = shard_mem_cache()
+                        .lock()
+                        .ok()
+                        .and_then(|guard| guard.get(&path).cloned())
+                        .filter(|memo| {
+                            memo.len == len
+                                && memo.modified_ns == modified_ns
+                                && memo.parser_version == identity.parser_version
+                        })
+                        .map(|memo| memo.entries)
+                    {
+                        return (
+                            shard_key,
+                            false,
+                            entries,
+                            Vec::new(),
+                            Vec::new(),
+                            None::<(PathBuf, String)>,
+                        );
+                    }
                 }
-                ShardReadStatus::Invalid(error) => {
-                    warn_cache_failure_once("source message cache shard is invalid", &path, &error);
-                    state.rewrite_shards.insert(shard_key);
-                    state.dirty = true;
-                    continue;
+
+                let (entries, migrated) = match read_shard(&path, identity) {
+                    ShardReadStatus::Loaded(entries) => (entries, false),
+                    ShardReadStatus::Migrated(entries) => (entries, true),
+                    ShardReadStatus::Missing => {
+                        return (shard_key, false, Vec::new(), Vec::new(), Vec::new(), None);
+                    }
+                    ShardReadStatus::Stale => {
+                        return (shard_key, true, Vec::new(), Vec::new(), Vec::new(), None);
+                    }
+                    ShardReadStatus::Invalid(error) => {
+                        return (
+                            shard_key,
+                            true,
+                            Vec::new(),
+                            Vec::new(),
+                            Vec::new(),
+                            Some((path, error)),
+                        );
+                    }
+                };
+                let mut rewrite_shard = migrated;
+                let mut loaded_entries = Vec::with_capacity(entries.len());
+                let mut repaired_keys = Vec::new();
+                let mut deleted_keys = Vec::new();
+                #[cfg(not(test))]
+                let mut verified_batch = Vec::with_capacity(entries.len() * 2);
+
+                for mut entry in entries {
+                    let key = CacheKey::from_entry(&entry);
+                    if key.shard() != shard_key || !entry.identity_is_current() {
+                        rewrite_shard = true;
+                        continue;
+                    }
+                    let repaired_billing = entry.remove_legacy_claude_tool_result_billing();
+                    // Only retained Claude history can outlive a missing source;
+                    // an ordinary deleted session must stop contributing usage.
+                    if !key.path.to_path_buf().exists() && !entry.holds_retained_history() {
+                        deleted_keys.push(key);
+                        continue;
+                    }
+                    let repaired_placeholders = entry.remove_claude_synthetic_placeholders();
+                    if repaired_billing || repaired_placeholders {
+                        repaired_keys.push(key.clone());
+                    }
+                    #[cfg(not(test))]
+                    {
+                        if entry.fingerprint.modified_ns > 0
+                            && entry.fingerprint.modified_ns < safe_mtime_cutoff_ns
+                        {
+                            verified_batch.push((
+                                entry.path.clone(),
+                                (entry.fingerprint.size, entry.fingerprint.modified_ns),
+                            ));
+                        }
+                        for related in &entry.fingerprint.related_files {
+                            if related.exists
+                                && related.modified_ns > 0
+                                && related.modified_ns < safe_mtime_cutoff_ns
+                            {
+                                verified_batch.push((
+                                    related.path.clone(),
+                                    (related.size, related.modified_ns),
+                                ));
+                            }
+                        }
+                    }
+                    loaded_entries.push((key, entry));
                 }
-            };
-            if migrated {
-                state.rewrite_shards.insert(shard_key.clone());
+
+                #[cfg(not(test))]
+                if !verified_batch.is_empty() {
+                    if let Ok(mut guard) = verified_fingerprints().write() {
+                        guard.extend(verified_batch);
+                    }
+                }
+
+                #[cfg(not(test))]
+                if !rewrite_shard && repaired_keys.is_empty() && deleted_keys.is_empty() {
+                    if let Some((len, modified_ns)) = shard_sig {
+                        if let Ok(mut guard) = shard_mem_cache().lock() {
+                            guard.insert(
+                                path,
+                                CachedShardMemo {
+                                    len,
+                                    modified_ns,
+                                    parser_version: identity.parser_version,
+                                    entries: loaded_entries.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+
+                (
+                    shard_key,
+                    rewrite_shard,
+                    loaded_entries,
+                    repaired_keys,
+                    deleted_keys,
+                    None,
+                )
+            })
+            .collect();
+
+        for (shard_key, rewrite_shard, loaded_entries, repaired_keys, deleted_keys, invalid_err) in
+            shard_outcomes
+        {
+            if let Some((path, error)) = invalid_err {
+                warn_cache_failure_once("source message cache shard is invalid", &path, &error);
+            }
+            if rewrite_shard {
+                state.rewrite_shards.insert(shard_key);
                 state.dirty = true;
             }
-            for mut entry in entries {
-                let key = CacheKey::from_entry(&entry);
-                if key.shard() != shard_key || !entry.identity_is_current() {
-                    state.rewrite_shards.insert(shard_key.clone());
-                    state.dirty = true;
-                    continue;
-                }
-                let repaired_billing = entry.remove_legacy_claude_tool_result_billing();
-                // Only retained Claude history can outlive a missing source;
-                // an ordinary deleted session must stop contributing usage.
-                if !key.path.to_path_buf().exists() && !entry.holds_retained_history() {
-                    state.deleted_keys.insert(key, DeletionReason::Missing);
-                    state.dirty = true;
-                    continue;
-                }
+            for key in deleted_keys {
+                state.deleted_keys.insert(key, DeletionReason::Missing);
+                state.dirty = true;
+            }
+            let repaired_set: HashSet<CacheKey> = repaired_keys.into_iter().collect();
+            for (key, entry) in loaded_entries {
                 // This scan already produced (or deleted) something for this
                 // source, and that is newer than the bytes on disk.
                 if state.entries.contains_key(&key)
@@ -3475,8 +3659,7 @@ impl SourceMessageCache {
                 {
                     continue;
                 }
-                let repaired_placeholders = entry.remove_claude_synthetic_placeholders();
-                if repaired_billing || repaired_placeholders {
+                if repaired_set.contains(&key) {
                     // Do not bump Claude's parser version here: compacted
                     // transcripts rely on cached assistant history that a
                     // full invalidation cannot recover. Persist only the safe
