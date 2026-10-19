@@ -2815,7 +2815,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
     // actually reads instead of for every client the machine has ever cached.
     let mut source_cache = match cache_policy {
         SourceCachePolicy::Persistent | SourceCachePolicy::PersistentDeferred => {
-            message_cache::SourceMessageCache::load()
+            let mut cache = message_cache::SourceMessageCache::load();
+            cache.preload_for_scan(&scan_result);
+            cache
         }
         SourceCachePolicy::InMemory => message_cache::SourceMessageCache::default(),
     };

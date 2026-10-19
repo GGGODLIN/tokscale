@@ -3383,21 +3383,6 @@ where
         .collect()
 }
 
-#[cfg(not(test))]
-#[derive(Clone)]
-struct CachedShardMemo {
-    len: u64,
-    modified_ns: u64,
-    parser_version: u32,
-    entries: Vec<(CacheKey, CachedSourceEntry)>,
-}
-
-#[cfg(not(test))]
-fn shard_mem_cache() -> &'static Mutex<HashMap<PathBuf, CachedShardMemo>> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedShardMemo>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 impl SourceMessageCache {
     /// Opens the persistent cache without reading any shard.
     ///
@@ -3416,12 +3401,41 @@ impl SourceMessageCache {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// 在外層檔案 `.par_iter()` 啟動前，於單一載入執行緒預先平行載入本次掃描有檔案的 namespace 分片，
+    /// 避免在持有 `self.state` Mutex 時於外層 `.par_iter()` 內巢狀呼叫 `into_par_iter()` 造成 Rayon 工作竊取自鎖。
+    pub(crate) fn preload_for_scan(&mut self, scan_result: &crate::scanner::ScanResult) {
+        let persistent = self.persistent;
+        if !persistent {
+            return;
+        }
+        let state = self.state.get_mut().unwrap_or_else(|p| p.into_inner());
+        for client in ClientId::iter() {
+            let has_files = !scan_result.get(client).is_empty()
+                || (client == ClientId::OpenCode && !scan_result.opencode_dbs.is_empty())
+                || (client == ClientId::MiMoCode && !scan_result.micode_dbs.is_empty())
+                || (client == ClientId::CherryStudio && scan_result.cherrystudio_db.is_some());
+            if has_files {
+                Self::load_namespace_shards(persistent, state, client.as_str(), true);
+            }
+        }
+    }
+
     /// Reads `namespace`'s shards into `state` the first time it is needed.
     ///
     /// Missing-source pruning happens here rather than in one pass over the
     /// whole cache, so it stays scoped to the namespaces this scan touched.
     fn ensure_namespace_loaded(&self, state: &mut CacheState, namespace: &'static str) {
-        if !self.persistent || !state.loaded_namespaces.insert(namespace) {
+        let parallel = rayon::current_thread_index().is_none();
+        Self::load_namespace_shards(self.persistent, state, namespace, parallel);
+    }
+
+    fn load_namespace_shards(
+        persistent: bool,
+        state: &mut CacheState,
+        namespace: &'static str,
+        parallel: bool,
+    ) {
+        if !persistent || !state.loaded_namespaces.insert(namespace) {
             return;
         }
         let Some(identity) = CacheIdentity::current_for_namespace(namespace) else {
@@ -3497,143 +3511,100 @@ impl SourceMessageCache {
             .unwrap_or(0)
             .saturating_sub(2_000_000_000);
 
-        // 256 個分片若在單一執行緒持鎖反序列化，會讓其餘 Rayon 執行緒空等並每 60 秒重讀 377 MB。
-        let shard_outcomes: Vec<_> = shard_paths
-            .into_par_iter()
-            .map(|(index, path)| {
-                let shard_key = CacheShardKey {
-                    namespace: namespace.to_string(),
-                    index,
-                };
-                #[cfg(not(test))]
-                let shard_sig = metadata_signature(&path).ok();
-                #[cfg(not(test))]
-                if let Some((len, modified_ns)) = shard_sig {
-                    if let Some(entries) = shard_mem_cache()
-                        .lock()
-                        .ok()
-                        .and_then(|guard| guard.get(&path).cloned())
-                        .filter(|memo| {
-                            memo.len == len
-                                && memo.modified_ns == modified_ns
-                                && memo.parser_version == identity.parser_version
-                        })
-                        .map(|memo| memo.entries)
-                    {
-                        return (
-                            shard_key,
-                            false,
-                            entries,
-                            Vec::new(),
-                            Vec::new(),
-                            None::<(PathBuf, String)>,
-                        );
-                    }
+        let load_one_shard = |(index, path): (usize, PathBuf)| {
+            let shard_key = CacheShardKey {
+                namespace: namespace.to_string(),
+                index,
+            };
+            let (entries, migrated) = match read_shard(&path, identity) {
+                ShardReadStatus::Loaded(entries) => (entries, false),
+                ShardReadStatus::Migrated(entries) => (entries, true),
+                ShardReadStatus::Missing => {
+                    return (shard_key, false, Vec::new(), Vec::new(), Vec::new(), None);
                 }
+                ShardReadStatus::Stale => {
+                    return (shard_key, true, Vec::new(), Vec::new(), Vec::new(), None);
+                }
+                ShardReadStatus::Invalid(error) => {
+                    return (
+                        shard_key,
+                        true,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        Some((path, error)),
+                    );
+                }
+            };
+            let mut rewrite_shard = migrated;
+            let mut loaded_entries = Vec::with_capacity(entries.len());
+            let mut repaired_keys = Vec::new();
+            let mut deleted_keys = Vec::new();
+            #[cfg(not(test))]
+            let mut verified_batch = Vec::with_capacity(entries.len() * 2);
 
-                let (entries, migrated) = match read_shard(&path, identity) {
-                    ShardReadStatus::Loaded(entries) => (entries, false),
-                    ShardReadStatus::Migrated(entries) => (entries, true),
-                    ShardReadStatus::Missing => {
-                        return (shard_key, false, Vec::new(), Vec::new(), Vec::new(), None);
-                    }
-                    ShardReadStatus::Stale => {
-                        return (shard_key, true, Vec::new(), Vec::new(), Vec::new(), None);
-                    }
-                    ShardReadStatus::Invalid(error) => {
-                        return (
-                            shard_key,
-                            true,
-                            Vec::new(),
-                            Vec::new(),
-                            Vec::new(),
-                            Some((path, error)),
-                        );
-                    }
-                };
-                let mut rewrite_shard = migrated;
-                let mut loaded_entries = Vec::with_capacity(entries.len());
-                let mut repaired_keys = Vec::new();
-                let mut deleted_keys = Vec::new();
+            for mut entry in entries {
+                let key = CacheKey::from_entry(&entry);
+                if key.shard() != shard_key || !entry.identity_is_current() {
+                    rewrite_shard = true;
+                    continue;
+                }
+                let repaired_billing = entry.remove_legacy_claude_tool_result_billing();
+                // Only retained Claude history can outlive a missing source;
+                // an ordinary deleted session must stop contributing usage.
+                if !key.path.to_path_buf().exists() && !entry.holds_retained_history() {
+                    deleted_keys.push(key);
+                    continue;
+                }
+                let repaired_placeholders = entry.remove_claude_synthetic_placeholders();
+                if repaired_billing || repaired_placeholders {
+                    repaired_keys.push(key.clone());
+                }
                 #[cfg(not(test))]
-                let mut verified_batch = Vec::with_capacity(entries.len() * 2);
-
-                for mut entry in entries {
-                    let key = CacheKey::from_entry(&entry);
-                    if key.shard() != shard_key || !entry.identity_is_current() {
-                        rewrite_shard = true;
-                        continue;
-                    }
-                    let repaired_billing = entry.remove_legacy_claude_tool_result_billing();
-                    // Only retained Claude history can outlive a missing source;
-                    // an ordinary deleted session must stop contributing usage.
-                    if !key.path.to_path_buf().exists() && !entry.holds_retained_history() {
-                        deleted_keys.push(key);
-                        continue;
-                    }
-                    let repaired_placeholders = entry.remove_claude_synthetic_placeholders();
-                    if repaired_billing || repaired_placeholders {
-                        repaired_keys.push(key.clone());
-                    }
-                    #[cfg(not(test))]
+                {
+                    if entry.fingerprint.modified_ns > 0
+                        && entry.fingerprint.modified_ns < safe_mtime_cutoff_ns
                     {
-                        if entry.fingerprint.modified_ns > 0
-                            && entry.fingerprint.modified_ns < safe_mtime_cutoff_ns
+                        verified_batch.push((
+                            entry.path.clone(),
+                            (entry.fingerprint.size, entry.fingerprint.modified_ns),
+                        ));
+                    }
+                    for related in &entry.fingerprint.related_files {
+                        if related.exists
+                            && related.modified_ns > 0
+                            && related.modified_ns < safe_mtime_cutoff_ns
                         {
-                            verified_batch.push((
-                                entry.path.clone(),
-                                (entry.fingerprint.size, entry.fingerprint.modified_ns),
-                            ));
-                        }
-                        for related in &entry.fingerprint.related_files {
-                            if related.exists
-                                && related.modified_ns > 0
-                                && related.modified_ns < safe_mtime_cutoff_ns
-                            {
-                                verified_batch.push((
-                                    related.path.clone(),
-                                    (related.size, related.modified_ns),
-                                ));
-                            }
-                        }
-                    }
-                    loaded_entries.push((key, entry));
-                }
-
-                #[cfg(not(test))]
-                if !verified_batch.is_empty() {
-                    if let Ok(mut guard) = verified_fingerprints().write() {
-                        guard.extend(verified_batch);
-                    }
-                }
-
-                #[cfg(not(test))]
-                if !rewrite_shard && repaired_keys.is_empty() && deleted_keys.is_empty() {
-                    if let Some((len, modified_ns)) = shard_sig {
-                        if let Ok(mut guard) = shard_mem_cache().lock() {
-                            guard.insert(
-                                path,
-                                CachedShardMemo {
-                                    len,
-                                    modified_ns,
-                                    parser_version: identity.parser_version,
-                                    entries: loaded_entries.clone(),
-                                },
-                            );
+                            verified_batch
+                                .push((related.path.clone(), (related.size, related.modified_ns)));
                         }
                     }
                 }
+                loaded_entries.push((key, entry));
+            }
 
-                (
-                    shard_key,
-                    rewrite_shard,
-                    loaded_entries,
-                    repaired_keys,
-                    deleted_keys,
-                    None,
-                )
-            })
-            .collect();
+            #[cfg(not(test))]
+            if !verified_batch.is_empty() {
+                if let Ok(mut guard) = verified_fingerprints().write() {
+                    guard.extend(verified_batch);
+                }
+            }
+
+            (
+                shard_key,
+                rewrite_shard,
+                loaded_entries,
+                repaired_keys,
+                deleted_keys,
+                None,
+            )
+        };
+
+        let shard_outcomes: Vec<_> = if parallel {
+            shard_paths.into_par_iter().map(load_one_shard).collect()
+        } else {
+            shard_paths.into_iter().map(load_one_shard).collect()
+        };
 
         for (shard_key, rewrite_shard, loaded_entries, repaired_keys, deleted_keys, invalid_err) in
             shard_outcomes
