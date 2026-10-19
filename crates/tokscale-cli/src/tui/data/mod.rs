@@ -803,6 +803,16 @@ impl DataLoader {
         let mut project_map: HashMap<String, ProjectUsage> = HashMap::new();
         let mut project_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
         // Memoizes the filesystem probes that resolve a workspace key to a label.
+        #[cfg(not(test))]
+        static SHARED_WORKSPACE_LABELER: std::sync::OnceLock<
+            std::sync::Mutex<tokscale_core::WorkspaceLabeler>,
+        > = std::sync::OnceLock::new();
+        #[cfg(not(test))]
+        let mut workspace_labeler = SHARED_WORKSPACE_LABELER
+            .get_or_init(|| std::sync::Mutex::new(tokscale_core::WorkspaceLabeler::default()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        #[cfg(test)]
         let mut workspace_labeler = tokscale_core::WorkspaceLabeler::default();
         // Labels are basenames, so two different directories that share one paint
         // the same row text. Resolve the whole set up front so collisions can be

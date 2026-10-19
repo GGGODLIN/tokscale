@@ -2804,13 +2804,9 @@ fn parse_all_messages_streaming<S: MessageSink>(
     let mut magpie =
         sessions::magpie::Reconciliation::read(scan_result.get(ClientId::Magpie), clients);
     if !magpie.is_empty() {
-        // 快取不保存此 sidecar；補讀可保留 compacted 歷史與原本去重鍵的 wire 契約。
-        for path in scan_result.get(ClientId::Codex) {
-            let parsed = sessions::codex::parse_codex_file_incremental(path, 0, Default::default());
-            if parsed.parse_succeeded {
-                magpie.codex_response_ids.extend(parsed.response_ids);
-            }
-        }
+        // 快取不保存此 sidecar；以程序內檔案簽章快取與平行補讀保留 compacted 歷史與去重鍵 wire 契約。
+        magpie.codex_response_ids =
+            sessions::magpie::load_codex_response_ids(scan_result.get(ClientId::Codex));
     }
     let magpie = std::cell::RefCell::new(magpie);
     // `load` reads no shard: each namespace is deserialized the first time a
@@ -4657,8 +4653,12 @@ impl WorkspaceLabeler {
             return cached.clone();
         }
         let decoded = self.decoded(key);
-        let label = sessions::workspace_display_label_for_decoded_key(key, decoded.as_deref())
-            .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string());
+        let label = sessions::workspace_display_label_for_decoded_key_with(
+            key,
+            decoded.as_deref(),
+            |repo_slug| self.decoded(repo_slug),
+        )
+        .unwrap_or_else(|| UNKNOWN_WORKSPACE_LABEL.to_string());
         self.labels.insert(key.to_string(), label.clone());
         label
     }
@@ -4734,7 +4734,11 @@ impl WorkspaceLabeler {
             .or_else(|| decoded.clone())
             // Undecodable slug (deleted worktree): fall back to the repo prefix
             // recovered from the slug string so it still merges with its repo.
-            .or_else(|| sessions::workspace_repo_root_from_slug(key));
+            .or_else(|| {
+                sessions::workspace_repo_root_from_slug_with(key, |repo_slug| {
+                    self.decoded(repo_slug)
+                })
+            });
         self.roots.insert(key.to_string(), root.clone());
         root
     }

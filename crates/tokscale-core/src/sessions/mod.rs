@@ -902,6 +902,14 @@ pub fn workspace_display_label(key: &str) -> Option<String> {
 /// [`workspace_display_label`] with the slug decode already done. See
 /// [`workspace_path_for_decoded_key`] for why the decode is hoisted out.
 pub fn workspace_display_label_for_decoded_key(key: &str, decoded: Option<&str>) -> Option<String> {
+    workspace_display_label_for_decoded_key_with(key, decoded, decode_claude_project_slug)
+}
+
+pub(crate) fn workspace_display_label_for_decoded_key_with(
+    key: &str,
+    decoded: Option<&str>,
+    decode_repo: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
     // Normalize before splitting: a client that recorded a raw Windows path
     // (`C:\a\repo`) carries no `/` to split on, so without this the label
     // would be the whole path — the same unreadable row this function exists to
@@ -923,7 +931,7 @@ pub fn workspace_display_label_for_decoded_key(key: &str, decoded: Option<&str>)
     // where the repo ends, so name it from the string rather than giving up and
     // showing the whole mangled path.
     if let Some((repo_slug, worktree)) = split_encoded_worktree(&path) {
-        let repo = decode_claude_project_slug(&repo_slug)
+        let repo = decode_repo(&repo_slug)
             .and_then(|decoded| workspace_label_from_key(&decoded))
             .or_else(|| last_slug_segment(&repo_slug))?;
         return Some(format!("{repo}{WORKTREE_SEPARATOR}{worktree}"));
@@ -937,8 +945,15 @@ pub fn workspace_display_label_for_decoded_key(key: &str, decoded: Option<&str>)
 /// real path when THAT still resolves, falling back to the repo slug itself —
 /// which keeps deleted worktrees of one repo together even then.
 pub fn workspace_repo_root_from_slug(key: &str) -> Option<String> {
+    workspace_repo_root_from_slug_with(key, decode_claude_project_slug)
+}
+
+pub(crate) fn workspace_repo_root_from_slug_with(
+    key: &str,
+    decode_repo: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
     let (repo_slug, _) = split_encoded_worktree(key)?;
-    Some(decode_claude_project_slug(&repo_slug).unwrap_or(repo_slug))
+    Some(decode_repo(&repo_slug).unwrap_or(repo_slug))
 }
 
 /// Best-effort trailing name of a dash-encoded slug whose directory is gone. The
