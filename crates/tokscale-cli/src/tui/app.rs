@@ -26,7 +26,7 @@ use super::data::{
 use super::glyph_probe::AmbientWidth;
 use super::i18n::{format_count, tr, MessageKey, TuiLanguage};
 use super::privacy::looks_like_email;
-use super::settings::Settings;
+use super::settings::{Settings, TabSortSetting, TuiViewSettings};
 use super::themes::{Theme, ThemeName};
 use super::ui::dialog::{ClientPickerDialog, ConfirmDialog, DialogStack, LanguagePickerDialog};
 use super::ui::widgets::{get_model_color, get_provider_from_model, get_provider_shade};
@@ -167,6 +167,39 @@ impl Tab {
             Tab::Agents => Tab::Stats,
         }
     }
+
+    pub fn as_settings_key(self) -> &'static str {
+        match self {
+            Tab::Overview => "overview",
+            Tab::Usage => "usage",
+            Tab::Models => "models",
+            Tab::Daily => "daily",
+            Tab::Hourly => "hourly",
+            Tab::Minutely => "minutely",
+            Tab::Monthly => "monthly",
+            Tab::Sessions => "sessions",
+            Tab::Projects => "projects",
+            Tab::Stats => "stats",
+            Tab::Agents => "agents",
+        }
+    }
+
+    pub fn from_settings_key(key: &str) -> Option<Tab> {
+        match key {
+            "overview" => Some(Tab::Overview),
+            "usage" => Some(Tab::Usage),
+            "models" => Some(Tab::Models),
+            "daily" => Some(Tab::Daily),
+            "hourly" => Some(Tab::Hourly),
+            "minutely" => Some(Tab::Minutely),
+            "monthly" => Some(Tab::Monthly),
+            "sessions" => Some(Tab::Sessions),
+            "projects" => Some(Tab::Projects),
+            "stats" => Some(Tab::Stats),
+            "agents" => Some(Tab::Agents),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -176,11 +209,47 @@ pub enum ChartGranularity {
     Hourly,
 }
 
+impl ChartGranularity {
+    pub fn as_settings_key(self) -> &'static str {
+        match self {
+            ChartGranularity::Daily => "daily",
+            ChartGranularity::Hourly => "hourly",
+        }
+    }
+
+    pub fn from_settings_key(key: &str) -> Option<Self> {
+        match key {
+            "daily" => Some(ChartGranularity::Daily),
+            "hourly" => Some(ChartGranularity::Hourly),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortField {
     Cost,
     Tokens,
     Date,
+}
+
+impl SortField {
+    pub fn as_settings_key(self) -> &'static str {
+        match self {
+            SortField::Cost => "cost",
+            SortField::Tokens => "tokens",
+            SortField::Date => "date",
+        }
+    }
+
+    pub fn from_settings_key(key: &str) -> Option<Self> {
+        match key {
+            "cost" => Some(SortField::Cost),
+            "tokens" => Some(SortField::Tokens),
+            "date" => Some(SortField::Date),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -190,10 +259,44 @@ pub enum HourlyViewMode {
     Profile,
 }
 
+impl HourlyViewMode {
+    pub fn as_settings_key(self) -> &'static str {
+        match self {
+            HourlyViewMode::Table => "table",
+            HourlyViewMode::Profile => "profile",
+        }
+    }
+
+    pub fn from_settings_key(key: &str) -> Option<Self> {
+        match key {
+            "table" => Some(HourlyViewMode::Table),
+            "profile" => Some(HourlyViewMode::Profile),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDirection {
     Ascending,
     Descending,
+}
+
+impl SortDirection {
+    pub fn as_settings_key(self) -> &'static str {
+        match self {
+            SortDirection::Ascending => "asc",
+            SortDirection::Descending => "desc",
+        }
+    }
+
+    pub fn from_settings_key(key: &str) -> Option<Self> {
+        match key {
+            "asc" => Some(SortDirection::Ascending),
+            "desc" => Some(SortDirection::Descending),
+            _ => None,
+        }
+    }
 }
 
 pub struct ClickArea {
@@ -584,13 +687,94 @@ impl App {
         let confirmed_codex_use_account_id = Rc::new(RefCell::new(None));
         let confirmed_codex_remove_account_id = Rc::new(RefCell::new(None));
         let confirmed_codex_reset_account_id = Rc::new(RefCell::new(None));
-        let requested_tab = config.initial_tab.unwrap_or(Tab::Overview);
+        let use_persisted_view = Self::should_use_persisted_tui_view();
+        let mut tab_sort_state: HashMap<Tab, (SortField, SortDirection)> = HashMap::new();
+        if use_persisted_view {
+            for (tab_key, sort_cfg) in &settings.tui_view.tab_sort {
+                if let (Some(tab), Some(field), Some(dir)) = (
+                    Tab::from_settings_key(tab_key),
+                    SortField::from_settings_key(&sort_cfg.field),
+                    SortDirection::from_settings_key(&sort_cfg.direction),
+                ) {
+                    tab_sort_state.insert(tab, (field, dir));
+                }
+            }
+        }
+
+        let persisted_tab = if use_persisted_view {
+            settings
+                .tui_view
+                .current_tab
+                .as_deref()
+                .and_then(Tab::from_settings_key)
+        } else {
+            None
+        };
+        let requested_tab = config
+            .initial_tab
+            .or(persisted_tab)
+            .unwrap_or(Tab::Overview);
         let current_tab = if Self::tab_visible(&settings, requested_tab) {
             requested_tab
         } else {
             Tab::Overview
         };
-        let (sort_field, sort_direction) = Self::default_sort_for_tab(current_tab);
+        let (sort_field, sort_direction) = tab_sort_state
+            .get(&current_tab)
+            .copied()
+            .unwrap_or_else(|| Self::default_sort_for_tab(current_tab));
+        let models_list_sort = tab_sort_state
+            .get(&Tab::Models)
+            .copied()
+            .unwrap_or((SortField::Cost, SortDirection::Descending));
+
+        let initial_group_by = if use_persisted_view {
+            settings
+                .tui_view
+                .group_by
+                .as_deref()
+                .and_then(|s| s.parse::<tokscale_core::GroupBy>().ok())
+                .unwrap_or(super::cache::TUI_DEFAULT_GROUP_BY)
+        } else {
+            super::cache::TUI_DEFAULT_GROUP_BY
+        };
+
+        let worktree_rollup =
+            if config.worktree_rollup != tokscale_core::WorktreeRollup::Separate || !use_persisted_view {
+                config.worktree_rollup
+            } else if settings.tui_view.worktree_rollup.as_deref() == Some("merge") {
+                tokscale_core::WorktreeRollup::MergeIntoRepo
+            } else {
+                tokscale_core::WorktreeRollup::Separate
+            };
+
+        let chart_granularity = if use_persisted_view {
+            settings
+                .tui_view
+                .chart_granularity
+                .as_deref()
+                .and_then(ChartGranularity::from_settings_key)
+                .unwrap_or_default()
+        } else {
+            ChartGranularity::default()
+        };
+
+        let hourly_view_mode = if use_persisted_view {
+            settings
+                .tui_view
+                .hourly_view_mode
+                .as_deref()
+                .and_then(HourlyViewMode::from_settings_key)
+                .unwrap_or_default()
+        } else {
+            HourlyViewMode::default()
+        };
+
+        let roll_up_subagents = if use_persisted_view {
+            settings.tui_view.roll_up_subagents.unwrap_or(false)
+        } else {
+            false
+        };
 
         let mut app = Self {
             should_quit: false,
@@ -601,12 +785,12 @@ impl App {
             data,
             data_loader,
             enabled_clients: Rc::new(RefCell::new(enabled_clients)),
-            group_by: Rc::new(RefCell::new(super::cache::TUI_DEFAULT_GROUP_BY)),
-            worktree_rollup: config.worktree_rollup,
+            group_by: Rc::new(RefCell::new(initial_group_by)),
+            worktree_rollup,
             sort_field,
             sort_direction,
-            tab_sort_state: HashMap::new(),
-            chart_granularity: ChartGranularity::default(),
+            tab_sort_state,
+            chart_granularity,
             scroll_offset: 0,
             selected_index: 0,
             max_visible_items: 20,
@@ -619,7 +803,7 @@ impl App {
             selected_model_trend: None,
             models_list_selected_index: 0,
             models_list_scroll_offset: 0,
-            models_list_sort: (SortField::Cost, SortDirection::Descending),
+            models_list_sort,
             selected_graph_cell: None,
             stats_breakdown_total_lines: 0,
             auto_refresh,
@@ -643,8 +827,8 @@ impl App {
             dialog_needs_reload,
             dialog_language_selected,
             dialog_needs_save_language,
-            hourly_view_mode: HourlyViewMode::default(),
-            roll_up_subagents: false,
+            hourly_view_mode,
+            roll_up_subagents,
             model_shade_map: HashMap::new(),
             subscription_usage: {
                 #[cfg(not(test))]
@@ -804,6 +988,7 @@ impl App {
         if *self.dialog_needs_reload.borrow() {
             *self.dialog_needs_reload.borrow_mut() = false;
             self.needs_reload = true;
+            self.save_tui_view_settings();
         }
 
         self.apply_pending_language_change();
@@ -1092,6 +1277,7 @@ impl App {
                     ChartGranularity::Daily => ChartGranularity::Hourly,
                     ChartGranularity::Hourly => ChartGranularity::Daily,
                 };
+                self.save_tui_view_settings();
             }
             KeyCode::Char('v') if self.current_tab == Tab::Hourly => {
                 self.hourly_view_mode = match self.hourly_view_mode {
@@ -1099,6 +1285,7 @@ impl App {
                     HourlyViewMode::Profile => HourlyViewMode::Table,
                 };
                 self.reset_selection();
+                self.save_tui_view_settings();
             }
             KeyCode::Char('g') => {
                 self.open_group_by_picker();
@@ -1122,10 +1309,12 @@ impl App {
                 // Rollup changes the grouping key, so rows must be rebuilt.
                 self.needs_reload = true;
                 self.reset_selection();
+                self.save_tui_view_settings();
             }
             KeyCode::Char('b') if self.current_tab == Tab::Sessions => {
                 self.roll_up_subagents = !self.roll_up_subagents;
                 self.reset_selection();
+                self.save_tui_view_settings();
                 let lang = self.settings.tui_language;
                 let count = self.active_sessions().len();
                 let state = tr(
@@ -1874,8 +2063,46 @@ impl App {
             .unwrap_or_else(|| Self::default_sort_for_tab(target));
         self.sort_field = field;
         self.sort_direction = dir;
+        self.save_tui_view_settings();
 
         self.maybe_fetch_usage_on_entry();
+    }
+
+    fn should_use_persisted_tui_view() -> bool {
+        !cfg!(test) || tokscale_core::paths::is_config_dir_overridden()
+    }
+
+    fn save_tui_view_settings(&mut self) {
+        if !Self::should_use_persisted_tui_view() {
+            return;
+        }
+        let mut tab_sort = BTreeMap::new();
+        for (&tab, &(field, direction)) in &self.tab_sort_state {
+            tab_sort.insert(
+                tab.as_settings_key().to_string(),
+                TabSortSetting {
+                    field: field.as_settings_key().to_string(),
+                    direction: direction.as_settings_key().to_string(),
+                },
+            );
+        }
+        let view = TuiViewSettings {
+            current_tab: Some(self.current_tab.as_settings_key().to_string()),
+            group_by: Some(self.group_by.borrow().to_string()),
+            worktree_rollup: Some(
+                match self.worktree_rollup {
+                    tokscale_core::WorktreeRollup::Separate => "separate",
+                    tokscale_core::WorktreeRollup::MergeIntoRepo => "merge",
+                }
+                .to_string(),
+            ),
+            chart_granularity: Some(self.chart_granularity.as_settings_key().to_string()),
+            hourly_view_mode: Some(self.hourly_view_mode.as_settings_key().to_string()),
+            roll_up_subagents: Some(self.roll_up_subagents),
+            tab_sort,
+        };
+        self.settings.tui_view = view.clone();
+        let _ = Settings::update_and_save("tuiView", view);
     }
 
     fn default_sort_for_tab(tab: Tab) -> (SortField, SortDirection) {
@@ -2076,6 +2303,7 @@ impl App {
             self.sort_direction = SortDirection::Descending;
         }
         self.persist_current_sort();
+        self.save_tui_view_settings();
         if (self.current_tab == Tab::Daily && self.is_daily_detail_active())
             || (self.current_tab == Tab::Monthly && self.is_monthly_detail_active())
             || (self.current_tab == Tab::Models && self.is_model_trend_active())
@@ -5069,6 +5297,48 @@ mod tests {
                 .unwrap()
                 .contains("save failed"));
         }
+    }
+
+    #[test]
+    fn tui_view_preferences_persist_and_restore() {
+        if !settings_test_runs_in_child("tui_view_preferences_persist_and_restore") {
+            return;
+        }
+
+        let path = crate::paths::get_config_dir().join("settings.json");
+        fs::write(&path, b"{}").unwrap();
+
+        let mut app = make_app();
+        // Switch to Models tab (Overview -> Usage -> Models)
+        app.handle_key_event(key(KeyCode::Tab));
+        app.handle_key_event(key(KeyCode::Tab));
+        assert_eq!(app.current_tab, Tab::Models);
+        // Sort by Tokens Descending, then toggle to Ascending
+        app.handle_key_event(key(KeyCode::Char('t')));
+        app.handle_key_event(key(KeyCode::Char('t')));
+        assert_eq!(app.sort_field, SortField::Tokens);
+        assert_eq!(app.sort_direction, SortDirection::Ascending);
+
+        // Set group_by to WorkspaceModel and toggle worktree rollup (`w`)
+        *app.group_by.borrow_mut() = tokscale_core::GroupBy::WorkspaceModel;
+        app.handle_key_event(key(KeyCode::Char('w')));
+        assert_eq!(
+            app.worktree_rollup,
+            tokscale_core::WorktreeRollup::MergeIntoRepo
+        );
+
+        let restored = make_app();
+        assert_eq!(restored.current_tab, Tab::Models);
+        assert_eq!(restored.sort_field, SortField::Tokens);
+        assert_eq!(restored.sort_direction, SortDirection::Ascending);
+        assert_eq!(
+            *restored.group_by.borrow(),
+            tokscale_core::GroupBy::WorkspaceModel
+        );
+        assert_eq!(
+            restored.worktree_rollup,
+            tokscale_core::WorktreeRollup::MergeIntoRepo
+        );
     }
 
     #[test]

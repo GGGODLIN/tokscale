@@ -235,6 +235,32 @@ pub struct CursorSettings {
     pub sync_timeout_seconds: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabSortSetting {
+    pub field: String,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuiViewSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tab: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_rollup: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chart_granularity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hourly_view_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roll_up_subagents: Option<bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tab_sort: BTreeMap<String, TabSortSetting>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutosubmitSettings {
@@ -383,6 +409,10 @@ pub struct Settings {
     /// Cursor integration preferences, e.g. the explicit sync budget.
     #[serde(default, deserialize_with = "deserialize_cursor_settings_lossy")]
     pub cursor: CursorSettings,
+    /// Persisted interactive TUI view preferences (active tab, per-tab sort,
+    /// group_by, worktree rollup, chart granularity, hourly view mode, subagent rollup).
+    #[serde(default, deserialize_with = "deserialize_tui_view_settings_lossy")]
+    pub tui_view: TuiViewSettings,
 }
 
 /// Lossy deserializer for `glyphs`: a typo or a non-string value falls back
@@ -406,6 +436,16 @@ where
 /// its default on every run. A value that is not a `cursor` object reads as
 /// the default section instead.
 fn deserialize_cursor_settings_lossy<'de, D>(deserializer: D) -> Result<CursorSettings, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer).ok().flatten();
+    Ok(value
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default())
+}
+
+fn deserialize_tui_view_settings_lossy<'de, D>(deserializer: D) -> Result<TuiViewSettings, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -500,6 +540,7 @@ impl Default for Settings {
             tui_light_mode: false,
             tui_language: TuiLanguage::En,
             cursor: CursorSettings::default(),
+            tui_view: TuiViewSettings::default(),
         }
     }
 }

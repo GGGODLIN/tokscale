@@ -126,6 +126,17 @@ fn spawn_background_loader(
                     let _ = tx.send(BackgroundLoadEvent::Data(Err(error)));
                 }
             }
+            #[cfg(target_os = "macos")]
+            {
+                extern "C" {
+                    fn malloc_zone_pressure_relief(zone: *mut std::ffi::c_void, goal: usize) -> usize;
+                }
+                // Release empty Malloc Large / Malloc Small pages accumulated during
+                // shard deserialization back to macOS instead of retaining them in RSS/swap.
+                unsafe {
+                    malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+                }
+            }
             // Ordered after Data and, on success, after synchronous persistence.
             // This event is the generation boundary used by the event loop.
             let _ = tx.send(BackgroundLoadEvent::Persisted);
@@ -313,7 +324,13 @@ pub fn run(
     // writes the TUI cache (notably `run_warm_tui_cache` in main.rs) keys
     // on the same constant. Hard-coding a different value here would
     // silently invalidate the cache on every launch after `submit`.
-    let initial_group_by = TUI_DEFAULT_GROUP_BY;
+    let initial_settings = settings::Settings::load();
+    let initial_group_by = initial_settings
+        .tui_view
+        .group_by
+        .as_deref()
+        .and_then(|s| s.parse::<tokscale_core::GroupBy>().ok())
+        .unwrap_or(TUI_DEFAULT_GROUP_BY);
     let initial_report_scope = background_cache_scope(&since, &until, &year);
     let (cached_data, needs_background_load) = decide_initial_data(load_cache(
         &enabled_clients,
@@ -416,16 +433,20 @@ pub fn run(
         let cache_group_by = bg_group_by.clone();
         let bg_report_scope = background_cache_scope(&since, &until, &year);
         let bg_minutely_enabled = app.settings.minutely_tab_enabled;
+        let bg_worktree_rollup = app.worktree_rollup;
 
         background_loader.start(spawn_background_loader(
             tx,
             move || {
                 let loader =
-                    background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled);
+                    background_data_loader(bg_since, bg_until, bg_year, bg_minutely_enabled)
+                        .with_worktree_rollup(bg_worktree_rollup);
                 loader.load_deferred(&bg_clients, &bg_group_by, bg_include_synthetic)
             },
             move |data| {
-                save_cached_data(data, &bg_enabled_clients, &cache_group_by, &bg_report_scope);
+                if bg_worktree_rollup == tokscale_core::WorktreeRollup::Separate {
+                    save_cached_data(data, &bg_enabled_clients, &cache_group_by, &bg_report_scope);
+                }
             },
         ));
     }
